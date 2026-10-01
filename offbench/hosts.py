@@ -1,8 +1,9 @@
 """Host registry: the metal hosts a task can be dispatched to.
 
-One JSON file (default ``hosts.json`` beside the package), a list of entries
-keyed by a short ``name``. Writes go through the same tmp + fsync + rename dance
-as queue.py so a half-written registry never replaces a good one. Pure stdlib.
+The shared registry kept by the hosts skill (~/.kiro/crew/hosts/registry.json) when it exists,
+otherwise ``hosts.json`` beside the package: a list of entries keyed by a short ``name``. The shared
+registry is read-only here. Writes to a local file go through the same tmp + fsync + rename dance as
+queue.py so a half-written registry never replaces a good one. Pure stdlib.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ class Host:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Host":
-        return cls(**d)
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
 class Registry:
@@ -58,6 +59,8 @@ class Registry:
         return self
 
     def save(self) -> Path:
+        if self.path.resolve() == shared_path().resolve():
+            raise RuntimeError(f"{self.path} is the shared registry; change it with hosts.py add/rm")
         doc = {"hosts": [self.hosts[n].to_dict() for n in sorted(self.hosts)]}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp")
@@ -107,8 +110,16 @@ class Registry:
 
 
 def default_path() -> Path:
-    # hosts.json lives at the package parent (repo root), beside README.md.
+    """OFFBENCH_HOSTS_FILE, else the shared registry the hosts skill keeps, else hosts.json beside README.md."""
+    if os.environ.get("OFFBENCH_HOSTS_FILE"):
+        return Path(os.environ["OFFBENCH_HOSTS_FILE"])
+    if shared_path().exists():
+        return shared_path()
     return Path(__file__).resolve().parent.parent / "hosts.json"
+
+
+def shared_path() -> Path:
+    return Path(os.environ.get("HOSTS_DIR") or Path.home() / ".kiro/crew/hosts") / "registry.json"
 
 
 def load_registry(path: Optional[Path] = None) -> Registry:

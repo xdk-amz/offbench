@@ -15,7 +15,8 @@ offbench/
   offbench/analysis.py   Welch t-test, CI95, acceptance (cand P1 vs stock P16), pipeline invariance, layout hint
   offbench/backfill.py   parse existing cccell/metalcell/ccsweep/batchdiag logs into records
   offbench/export.py     records + queue state -> dash/data/dashboard.json
-  offbench/hosts.py      host registry (hosts.json): the metal hosts a task dispatches to
+  offbench/hosts.py      host registry: the shared one the hosts skill keeps (read-only here)
+  offbench/lease.py      host leases for repl-run / dispatch / deploy / push via hosts.py claim
   offbench/dispatch.py   split one task across hosts, push a subtask to each host queue
   offbench/deploy.py     rsync source + start the worker in tmux on a host
   offbench/sync.py       pull each host's results/status/queue back; merge (deduped)
@@ -26,7 +27,6 @@ offbench/
   vendor/cachecannon/    owned cachecannon source, pinned + auth baked in; built on the host
   dash/index.html        static dashboard (Chart.js from jsdelivr)
   bins.json              rig directory name -> commit / branch / role
-  hosts.json             registered metal hosts (name -> ssh, instance-id, remote_root)
   data/                  default root: queue/ running/ done/ failed/ results.jsonl status.json hosts/
 ```
 
@@ -56,10 +56,26 @@ deploy-time patch; the worker's Builder compiles `vendor/cachecannon` on the
 host on first task and caches the binary.
 
 ```
-python3 -m offbench hosts add metal-2 ec2-user@<ip> --instance-id i-...
 OFFBENCH_KEY=../rig/<key>.pem OFFBENCH_KNOWN_HOSTS=../rig/known_hosts \
     python3 -m offbench deploy --hosts metal-2,metal-3
 ```
+
+## Hosts and leases
+
+Hosts come from the shared registry the hosts skill keeps (`~/.kiro/crew/hosts/registry.json`;
+`hosts.py add` registers one). `OFFBENCH_HOSTS_FILE` or `--hosts-file` points offbench at a local
+file instead, and then nothing is leased.
+
+The commands that use hosts lease them through `hosts.py claim`, and stop with exit 2 when another
+session holds one:
+
+- `repl-run` holds its hosts for its own run and gives back the ones it took when it exits.
+- `dispatch`, `deploy` and `push` take 12 h session leases, since the work outlives the command.
+- Hosts the caller already holds are left as they are, and a host it does not hold is refused when
+  work is already running there.
+
+A driver that calls repl-run several times should hold the hosts across the gaps between runs:
+`hosts.py run --hosts metal-2,metal-7,metal-8 --label "..." -- python3 driver.py`.
 
 To bring the worker up by hand instead (source already on the host):
 

@@ -1,7 +1,7 @@
 """Project-root module entrypoint for ``python3 -m offbench``.
 
 The canonical project nests two ``offbench`` directories: this project root
-(holding ``bins.json``, ``hosts.json``, ``data/``, ``vendor/`` and the inner
+(holding ``bins.json``, ``data/``, ``vendor/`` and the inner
 package) and the inner ``offbench/`` Python package (``cli.py``, ``runner.py``).
 Which one ``python3 -m offbench`` resolves depends on the caller's cwd:
 

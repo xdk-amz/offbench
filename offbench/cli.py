@@ -29,6 +29,7 @@ from . import analysis, backfill, export
 from . import deploy as deploy_mod
 from . import dispatch as dispatch_mod
 from . import hosts as hosts_mod
+from . import lease as lease_mod
 from . import sync as sync_mod
 from .queue import Queue, Task
 from .schema import Bin, read_records
@@ -257,6 +258,16 @@ def cmd_push(a: argparse.Namespace) -> int:
     """Copy a task file into the rig queue atomically (tmp name, then mv)."""
     doc = json.loads(Path(a.task_file).read_text())
     task = Task.from_dict(doc)
+    reg = hosts_mod.load_registry()
+    names = [h.name for h in reg.list() if h.ssh == a.host]
+    if names:
+        try:
+            lease_mod.claim(names, f"offbench push {task.task_id}", registry=reg.path)
+        except lease_mod.LeaseError as e:
+            print(f"push: {e}", file=sys.stderr)
+            return 2
+    else:
+        print(f"warning: {a.host} is not a registered host, pushing without a lease", file=sys.stderr)
     remote = _push_doc(a, doc, a.host, a.remote_root)
     print(f"pushed {task.task_id} -> {a.host}:{remote}")
     return 0
@@ -298,6 +309,11 @@ def cmd_dispatch(a: argparse.Namespace) -> int:
 
     cfg = dispatch_mod.DispatchConfig(key=a.key or None, known_hosts=a.known_hosts or None,
                                       strict_host_key=_strict_known_hosts(a.known_hosts))
+    try:
+        lease_mod.claim([h.name for h in targets], f"offbench dispatch {task.task_id}", registry=reg.path)
+    except lease_mod.LeaseError as e:
+        print(f"dispatch: {e}", file=sys.stderr)
+        return 2
     try:
         res = dispatch_mod.dispatch_task(task, targets, cfg)
     except ValueError as e:
@@ -407,6 +423,11 @@ def cmd_deploy(a: argparse.Namespace) -> int:
     try:
         targets = reg.resolve(names)
     except KeyError as e:
+        print(f"deploy: {e}", file=sys.stderr)
+        return 2
+    try:
+        lease_mod.claim([h.name for h in targets], "offbench deploy (worker)", registry=reg.path)
+    except lease_mod.LeaseError as e:
         print(f"deploy: {e}", file=sys.stderr)
         return 2
     cfg = deploy_mod.SshConfig(
@@ -520,11 +541,19 @@ def cmd_hosts(a: argparse.Namespace) -> int:
     if a.hcmd == "add":
         h = hosts_mod.Host(name=a.name, ssh=a.ssh, instance_id=a.instance_id, az=a.az,
                            remote_root=a.remote_root, tags=_strs(a.tags) if a.tags else [])
-        reg.add(h, replace=a.replace)
+        try:
+            reg.add(h, replace=a.replace)
+        except RuntimeError as e:
+            print(f"hosts add: {e}", file=sys.stderr)
+            return 2
         print(f"added {h.name} ({h.ssh}) -> {reg.path}")
         return 0
     if a.hcmd == "rm":
-        print(f"removed {a.name}" if reg.remove(a.name) else f"no host named {a.name!r}")
+        try:
+            print(f"removed {a.name}" if reg.remove(a.name) else f"no host named {a.name!r}")
+        except RuntimeError as e:
+            print(f"hosts rm: {e}", file=sys.stderr)
+            return 2
         return 0
     if a.hcmd == "probe":
         names = _strs(a.names) if a.names else [h.name for h in reg.list()]
@@ -567,17 +596,31 @@ def cmd_repl_agent(a: argparse.Namespace) -> int:
 
 def cmd_repl_run(a: argparse.Namespace) -> int:
     from . import repl
-    reg = hosts_mod.load_registry(a.hosts_file).hosts
+    registry = hosts_mod.load_registry(a.hosts_file)
+    reg = registry.hosts
+    names = {"primary": a.primary, "replica": a.replica, "gen": a.gen, **({"rgen": a.reader_gen} if a.reader_gen else {})}
+    if len(set(names.values())) != len(names):
+        print("primary, replica, gen and reader-gen must be distinct hosts", file=sys.stderr)
+        return 2
+    missing = [n for n in names.values() if n not in reg]
+    if missing:
+        print(f"no host named {', '.join(missing)}; known: {', '.join(sorted(reg)) or '(none)'}", file=sys.stderr)
+        return 2
+    try:
+        with lease_mod.held(list(names.values()), f"offbench repl-run {Path(a.out).stem}", registry=registry.path):
+            return _repl_run(a, repl, reg, names)
+    except lease_mod.LeaseError as e:
+        print(f"repl-run: {e}", file=sys.stderr)
+        return 2
+
+
+def _repl_run(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
     ssh = repl.Ssh(a.key, a.known_hosts)
     roles = {}
-    names = {"primary": a.primary, "replica": a.replica, "gen": a.gen, **({"rgen": a.reader_gen} if a.reader_gen else {})}
     for role, name in names.items():
         h = reg[name]
         tmp = repl.Role(h.name, h.ssh, "")
         roles[role] = repl.Role(h.name, h.ssh, ssh.call(tmp, {"action": "ip"})["ip"])
-    if len({r.name for r in roles.values()}) != len(roles):
-        print("primary, replica, gen and reader-gen must be distinct hosts", file=sys.stderr)
-        return 2
     bins = [repl.ReplBin.parse(kv) for kv in a.bins.split(",")]
     share = {s for s in a.share_bins.split(",") if s}
     if share - {b.name for b in bins} or (share and a.pin_share):
@@ -693,7 +736,7 @@ def main(argv=None) -> int:
     s = sub.add_parser("serve"); s.add_argument("--port", type=int, default=8765); s.set_defaults(fn=cmd_serve)
 
     h = sub.add_parser("hosts", help="host registry: list|add|rm|probe")
-    h.add_argument("--hosts-file", type=Path, default=None, help="registry path (default hosts.json beside the package)")
+    h.add_argument("--hosts-file", type=Path, default=None, help="registry path (default: the shared host registry)")
     hs = h.add_subparsers(dest="hcmd", required=True)
     hs.add_parser("list").set_defaults(fn=cmd_hosts)
     ha = hs.add_parser("add")
@@ -724,7 +767,7 @@ def main(argv=None) -> int:
     syg.add_argument("--all", action="store_true", help="every registered host")
     syg.add_argument("--hosts", default=None, help="comma-separated registered host names")
     sy.add_argument("--hosts-file", type=Path, default=None,
-                    help="registry path (default hosts.json beside the package)")
+                    help="registry path (default: the shared host registry)")
     sy.add_argument("--key", default=os.environ.get("OFFBENCH_KEY", ""))
     sy.add_argument("--known-hosts", default=os.environ.get("OFFBENCH_KNOWN_HOSTS", "/dev/null"))
     sy.set_defaults(fn=cmd_sync)
@@ -734,13 +777,13 @@ def main(argv=None) -> int:
     stg.add_argument("--all", action="store_true", help="every registered host")
     stg.add_argument("--hosts", default=None, help="comma-separated registered host names")
     stp.add_argument("--hosts-file", type=Path, default=None,
-                     help="registry path (default hosts.json beside the package)")
+                     help="registry path (default: the shared host registry)")
     stp.set_defaults(fn=cmd_status)
 
     d = sub.add_parser("dispatch", help="split a task across registered hosts and push to each")
     d.add_argument("task_file")
     d.add_argument("--hosts", required=True, help="comma-separated registered host names (a,b[,c])")
-    d.add_argument("--hosts-file", type=Path, default=None, help="registry path (default hosts.json beside the package)")
+    d.add_argument("--hosts-file", type=Path, default=None, help="registry path (default: the shared host registry)")
     d.add_argument("--key", default=os.environ.get("OFFBENCH_KEY", ""))
     d.add_argument("--known-hosts", default=os.environ.get("OFFBENCH_KNOWN_HOSTS", "/dev/null"))
     d.add_argument("--dry-run", action="store_true", help="print the per-host split, push nothing")
@@ -749,7 +792,7 @@ def main(argv=None) -> int:
     dep = sub.add_parser("deploy", help="rsync source + start the worker on --hosts")
     dep.add_argument("--hosts", required=True, help="comma-separated registered host names")
     dep.add_argument("--hosts-file", type=Path, default=None,
-                     help="registry path (default hosts.json beside the package)")
+                     help="registry path (default: the shared host registry)")
     dep.add_argument("--key", default=os.environ.get("OFFBENCH_KEY", ""))
     dep.add_argument("--known-hosts", default=os.environ.get("OFFBENCH_KNOWN_HOSTS", "/dev/null"))
     dep.add_argument("--package-dir", default=None,
@@ -783,7 +826,7 @@ def main(argv=None) -> int:
     rr.add_argument("--max-rtt-ms", type=float, default=0.15,
                     help="refuse to run if the generator's median round trip to either server exceeds this (0 = off)")
     rr.add_argument("--out", default="data/repl/results.jsonl")
-    rr.add_argument("--hosts-file", type=Path, default=Path("hosts.json"))
+    rr.add_argument("--hosts-file", type=Path, default=None, help="registry path (default: the shared host registry)")
     rr.add_argument("--key", default=os.environ.get("OFFBENCH_KEY"))
     rr.add_argument("--known-hosts", default=os.environ.get("OFFBENCH_KNOWN_HOSTS"))
     rr.set_defaults(fn=cmd_repl_run)

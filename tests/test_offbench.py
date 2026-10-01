@@ -1029,3 +1029,95 @@ def test_repl_reader_host_layout_and_its_ena_counters():
     rgm["b"]["ena"] = dict(z, pps_allowance_exceeded=7)
     rec = repl.build_record(c, repl.ReplBin("a", "1"), 1, roles, pm, rm, gm, gens, stops, 6, "r", rgm=rgm)
     assert rec["invalid"] == ["reader gen ENA allowance exceeded {'pps_allowance_exceeded': 7}"]
+
+
+# ---- host leases ------------------------------------------------------------
+
+import os  # noqa: E402
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+import time  # noqa: E402
+
+from offbench import cli, lease  # noqa: E402
+
+HOSTS_TOOL = Path.home() / ".kiro/crew/skills/hosts/hosts.py"
+needs_tool = pytest.mark.skipif(not HOSTS_TOOL.exists(), reason="hosts tool not installed")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_host_registry(tmp_path_factory, monkeypatch):
+    """No test reads or leases hosts in the real shared registry."""
+    monkeypatch.setenv("HOSTS_DIR", str(tmp_path_factory.mktemp("no-shared-hosts")))
+
+
+def _shared(tmp_path, monkeypatch, names=("p", "r", "g")):
+    d = tmp_path / "hostsdir"
+    d.mkdir()
+    monkeypatch.setenv("HOSTS_DIR", str(d))
+    monkeypatch.setenv("KIRO_SESSION_ID", "offbench-test")
+    monkeypatch.delenv("OFFBENCH_HOSTS_FILE", raising=False)
+    monkeypatch.delenv("HOSTS_LEASE", raising=False)
+    doc = {"version": 1, "ssh_options": {}, "leases": {}, "rtt": {"pairs": {}},
+           "hosts": [{"name": n, "ssh": "ec2-user@192.0.2.1", "instance_id": "", "az": "", "private_ip": "192.0.2.1",
+                      "remote_root": "~/offbench", "tags": [], "notes": "x"} for n in names]}
+    (d / "registry.json").write_text(json.dumps(doc))
+    return d / "registry.json"
+
+
+def test_shared_registry_is_default_and_read_only(tmp_path, monkeypatch, capsys):
+    path = _shared(tmp_path, monkeypatch)
+    assert hosts.default_path() == path
+    reg = hosts.load_registry()
+    assert reg.get("p").ssh == "ec2-user@192.0.2.1"
+    with pytest.raises(RuntimeError):
+        reg.add(hosts.Host(name="z", ssh="ec2-user@192.0.2.9"))
+    assert cli.main(["hosts", "add", "z", "ec2-user@192.0.2.9"]) == 2
+    assert "shared registry" in capsys.readouterr().err
+    monkeypatch.setenv("OFFBENCH_HOSTS_FILE", str(tmp_path / "local.json"))
+    assert hosts.default_path() == tmp_path / "local.json"
+
+
+@needs_tool
+def test_lease_held_takes_and_releases(tmp_path, monkeypatch):
+    path = _shared(tmp_path, monkeypatch)
+    with lease.held(["p", "r"], "test", registry=path, probe=False) as taken:
+        assert taken == ["p", "r"]
+        lz = json.loads(path.read_text())["leases"]
+        assert lz["p"]["holder"]["pid"] == os.getpid() and lz["p"]["kind"] == "job"
+    assert json.loads(path.read_text())["leases"] == {}
+
+
+@needs_tool
+def test_lease_keeps_what_the_caller_already_holds(tmp_path, monkeypatch):
+    path = _shared(tmp_path, monkeypatch)
+    subprocess.run([sys.executable, str(HOSTS_TOOL), "acquire", "p", "--label", "mine", "--ignore-busy"],
+                   check=True, capture_output=True)
+    with lease.held(["p", "r"], "test", registry=path, probe=False) as taken:
+        assert taken == ["r"]
+    lz = json.loads(path.read_text())["leases"]
+    assert set(lz) == {"p"} and lz["p"]["owner"]["label"] == "mine"
+
+
+def test_local_hosts_file_runs_unleased(tmp_path, monkeypatch, capsys):
+    path = _shared(tmp_path, monkeypatch)
+    local = tmp_path / "hosts.json"
+    local.write_text(json.dumps({"hosts": [{"name": "p", "ssh": "ec2-user@192.0.2.1"}]}))
+    with lease.held(["p"], "test", registry=local, probe=False) as taken:
+        assert taken == []
+    assert "without leases" in capsys.readouterr().err
+    assert json.loads(path.read_text())["leases"] == {}
+
+
+@needs_tool
+def test_repl_run_refuses_hosts_leased_elsewhere(tmp_path, monkeypatch, capsys):
+    path = _shared(tmp_path, monkeypatch)
+    monkeypatch.setenv("KIRO_SESSION_ID", "someone-else")
+    subprocess.run([sys.executable, str(HOSTS_TOOL), "acquire", "r", "--label", "theirs", "--ignore-busy"],
+                   check=True, capture_output=True)
+    monkeypatch.setenv("KIRO_SESSION_ID", "offbench-test")
+    t0 = time.time()
+    rc = cli.main(["repl-run", "--primary", "p", "--replica", "r", "--gen", "g", "--bins", "a=" + "0" * 40,
+                   "--out", str(tmp_path / "o.jsonl")])
+    assert rc == 2 and time.time() - t0 < 10  # refused before any ssh to the unroutable test address
+    assert "held by another session" in capsys.readouterr().err
+    assert set(json.loads(path.read_text())["leases"]) == {"r"}
