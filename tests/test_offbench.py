@@ -1121,3 +1121,10 @@ def test_repl_run_refuses_hosts_leased_elsewhere(tmp_path, monkeypatch, capsys):
     assert rc == 2 and time.time() - t0 < 10  # refused before any ssh to the unroutable test address
     assert "held by another session" in capsys.readouterr().err
     assert set(json.loads(path.read_text())["leases"]) == {"r"}
+
+
+def test_cli_imports_without_the_lease_module():
+    """Hosts get cli.py synced on its own, so importing it must not pull in lease.py."""
+    r = subprocess.run([sys.executable, "-c", "import sys, offbench.cli; print('offbench.lease' in sys.modules)"],
+                       cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and r.stdout.strip() == "False", r.stderr

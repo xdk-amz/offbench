@@ -29,7 +29,6 @@ from . import analysis, backfill, export
 from . import deploy as deploy_mod
 from . import dispatch as dispatch_mod
 from . import hosts as hosts_mod
-from . import lease as lease_mod
 from . import sync as sync_mod
 from .queue import Queue, Task
 from .schema import Bin, read_records
@@ -256,6 +255,7 @@ def _push_doc(a: argparse.Namespace, doc: dict, host: str, remote_root: str) -> 
 
 def cmd_push(a: argparse.Namespace) -> int:
     """Copy a task file into the rig queue atomically (tmp name, then mv)."""
+    from . import lease as lease_mod
     doc = json.loads(Path(a.task_file).read_text())
     task = Task.from_dict(doc)
     reg = hosts_mod.load_registry()
@@ -309,6 +309,7 @@ def cmd_dispatch(a: argparse.Namespace) -> int:
 
     cfg = dispatch_mod.DispatchConfig(key=a.key or None, known_hosts=a.known_hosts or None,
                                       strict_host_key=_strict_known_hosts(a.known_hosts))
+    from . import lease as lease_mod
     try:
         lease_mod.claim([h.name for h in targets], f"offbench dispatch {task.task_id}", registry=reg.path)
     except lease_mod.LeaseError as e:
@@ -425,6 +426,7 @@ def cmd_deploy(a: argparse.Namespace) -> int:
     except KeyError as e:
         print(f"deploy: {e}", file=sys.stderr)
         return 2
+    from . import lease as lease_mod
     try:
         lease_mod.claim([h.name for h in targets], "offbench deploy (worker)", registry=reg.path)
     except lease_mod.LeaseError as e:
@@ -595,6 +597,7 @@ def cmd_repl_agent(a: argparse.Namespace) -> int:
 
 
 def cmd_repl_run(a: argparse.Namespace) -> int:
+    from . import lease as lease_mod
     from . import repl
     registry = hosts_mod.load_registry(a.hosts_file)
     reg = registry.hosts
