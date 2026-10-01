@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>offbench · branch compare</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --ob-bg: var(--bg, #0f1115);
+    --ob-bg-elevated: var(--bg-elevated, #14171d);
+    --ob-card: var(--card, #171a21);
+    --ob-card-fg: var(--card-fg, #e6e6e6);
+    --ob-text: var(--text, #e6e6e6);
+    --ob-text-strong: var(--text-strong, #ffffff);
+    --ob-muted: var(--muted, #8b93a7);
+    --ob-border: var(--border, #2a2f3a);
+    --ob-accent: var(--accent, #6ea8fe);
+    --ob-ok: var(--ok, #3fb950);
+    --ob-warn: var(--warn, #d29922);
+    --ob-danger: var(--danger, #f85149);
+    --ob-ok-subtle: var(--ok-subtle, rgba(63,185,80,.15));
+    --ob-danger-subtle: var(--danger-subtle, rgba(248,81,73,.15));
+    --ob-warn-subtle: var(--warn-subtle, rgba(210,153,34,.15));
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--ob-bg); color: var(--ob-text); }
+  .top { position: sticky; top: 0; z-index: 2; background: var(--ob-bg-elevated); border-bottom: 1px solid var(--ob-border); }
+  header { display: flex; align-items: baseline; gap: 18px; padding: 12px 22px 8px; }
+  header h1 { margin: 0; font-size: 17px; font-weight: 650; color: var(--ob-text-strong); }
+  main { padding: 18px 22px 60px; max-width: 1500px; margin: 0 auto; }
+  section { margin-bottom: 28px; }
+  h2 { font-size: 14px; font-weight: 650; margin: 0 0 4px; color: var(--ob-text-strong); }
+  .sub { color: var(--ob-muted); font-size: 12px; margin-bottom: 10px; }
+  .card { background: var(--ob-card); color: var(--ob-card-fg); border: 1px solid var(--ob-border); border-radius: 10px; padding: 12px 14px; min-width: 0; overflow-x: auto; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid2.wide { grid-template-columns: 1fr; }
+  @media (max-width: 1100px) { .grid2, .grid2.wide { grid-template-columns: 1fr; } }
+  .controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; padding: 6px 22px 10px; border-top: 1px solid var(--ob-border); }
+  .controls .g { display: flex; align-items: center; gap: 6px; }
+  .controls .g span { color: var(--ob-muted); font-size: 12px; }
+  .seg { display: inline-flex; border: 1px solid var(--ob-border); border-radius: 6px; overflow: hidden; }
+  .seg button { background: var(--ob-bg); color: var(--ob-text); border: 0; border-right: 1px solid var(--ob-border); padding: 4px 10px; font: inherit; cursor: pointer; }
+  .seg button:last-child { border-right: 0; }
+  .seg button.on { background: var(--ob-accent); color: var(--ob-bg); font-weight: 650; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { padding: 5px 8px; border-bottom: 1px solid var(--ob-border); text-align: right; white-space: nowrap; }
+  th { color: var(--ob-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .3px; }
+  td:first-child, th:first-child { text-align: left; }
+  td.delta { font-weight: 650; }
+  td.unsat, span.unsat { color: var(--ob-muted); }
+  .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .pill { display: inline-block; padding: 0 7px; border-radius: 999px; font-size: 10.5px; font-weight: 650; border: 1px solid var(--ob-border); margin-left: 6px; }
+  .pill.acl { color: var(--ob-warn); border-color: var(--ob-warn); background: var(--ob-warn-subtle); }
+  .pill.low { color: var(--ob-muted); }
+  .mut { color: var(--ob-muted); }
+  .chart { position: relative; height: 300px; }
+  .chart.short { position: relative; height: 240px; }
+  .empty { color: var(--ob-muted); font-style: italic; padding: 10px 0; }
+</style>
+</head>
+<body>
+<div class="top">
+<header>
+  <h1>offbench</h1>
+</header>
+<div class="controls" id="controls">
+  <div class="g"><span>workload</span><div class="seg" id="cWorkload"></div></div>
+  <div class="g"><span>pipeline</span><div class="seg" id="cPipeline"></div></div>
+  <div class="g"><span>conns</span><div class="seg" id="cConns"></div></div>
+  <div class="g"><span>io-threads</span><div class="seg" id="cIot"></div></div>
+  <div class="g"><span>ACL</span><div class="seg" id="cAcl"></div></div>
+  <div class="g"><span>load</span><div class="seg" id="cRate"></div></div>
+  <div class="g"><span>CPU pinning</span><div class="seg" id="cPin"></div></div>
+</div>
+</div>
+<main>
+
+<section id="scenario">
+  <h2 id="scenTitle">Scenario</h2>
+  <div class="sub">Every build measured at exactly this configuration. Mean of all reps, ± is the 95% CI across reps. <b>main</b> is the main-thread busy %; a build whose main is below <span id="gate"></span>% did not saturate the server in that cell (limited by its IO path or by the generator), so its number is greyed and its Δ is indicative only. Δ is against stock with the same ACL setting (for the stock + ACL row it is the ACL tax vs stock); Δ<sub>stock</sub> is against stock with ACL off.</div>
+  <div class="grid2 wide">
+    <div class="card"><div class="chart"><canvas id="scenChart"></canvas></div></div>
+    <div class="card"><div id="scenTable"></div></div>
+  </div>
+</section>
+
+<section id="latency">
+  <h2>Latency at this scenario</h2>
+  <div class="sub">Client-observed request latency from cachecannon (µs), aggregated over the 6 s window: percentiles are the median across reps, max is the max across reps. Ticks on each bar mark the lowest and highest rep for that percentile. At saturation (closed loop) latency is mostly queueing, roughly conns ÷ throughput; compare builds at a <b>fixed load</b> (load selector) for a like-for-like tail. Δ is p99 against stock with the same ACL setting. Recorded only for sessions run from 2026-09-22 on.</div>
+  <div class="grid2 wide">
+    <div class="card"><div class="chart short"><canvas id="latChart"></canvas></div></div>
+    <div class="card"><div id="latTable"></div></div>
+  </div>
+</section>
+
+</main>
+<script>
+const css = (v, fb) => (getComputedStyle(document.documentElement).getPropertyValue(v).trim() || fb);
+const C = { text: css('--text', '#e6e6e6'), muted: css('--muted', '#8b93a7'), border: css('--border', '#2a2f3a'),
+            accent: css('--accent', '#6ea8fe'), ok: css('--ok', '#3fb950'), warn: css('--warn', '#d29922'), danger: css('--danger', '#f85149') };
+const BUILD_COLORS = ['#9aa4b5', '#6ea8fe', '#c678dd', '#e5c07b', '#3fb950', '#56b6c2', '#f85149'];
+Chart.defaults.color = C.text; Chart.defaults.borderColor = C.border; Chart.defaults.font.size = 11;
+Chart.defaults.plugins.legend.labels.boxWidth = 10;
+Chart.defaults.animation = false;
+
+const fmtK = v => v == null ? '–' : Math.round(v).toLocaleString();
+const fmtP = (v, d = 1) => v == null ? '–' : (v > 0 ? '+' : '') + v.toFixed(d) + '%';
+const $ = id => document.getElementById(id);
+const charts = {};
+function mkChart(id, cfg) { if (charts[id]) charts[id].destroy(); charts[id] = new Chart($(id), cfg); }
+function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; }
+function deltaColor(d) { if (d == null) return ''; const a = Math.min(Math.abs(d), 100) / 100; return d >= 0 ? `rgba(63,185,80,${0.12 + a * 0.68})` : `rgba(248,81,73,${0.12 + a * 0.68})`; }
+
+// Whiskers for bar charts. dataset.ci = ± values in y units around the bar; dataset.range = [lo, hi] absolute.
+const whiskers = { id: 'whiskers', afterDatasetsDraw(chart) {
+  const { ctx } = chart;
+  chart.data.datasets.forEach((ds, di) => {
+    if (!ds.ci && !ds.range) return;
+    const meta = chart.getDatasetMeta(di); if (meta.hidden) return;
+    meta.data.forEach((bar, i) => {
+      if (ds.data[i] == null) return;
+      let lo, hi;
+      if (ds.range) { const r = ds.range[i]; if (!r) return; [lo, hi] = r; }
+      else { const ci = ds.ci[i]; if (ci == null) return; lo = ds.data[i] - ci; hi = ds.data[i] + ci; }
+      const y0 = chart.scales.y.getPixelForValue(lo), y1 = chart.scales.y.getPixelForValue(hi);
+      const hw = Math.max(3, Math.min(6, (bar.width || 12) * 0.35));
+      ctx.save(); ctx.strokeStyle = C.text; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(bar.x, y0); ctx.lineTo(bar.x, y1); ctx.moveTo(bar.x - hw, y0); ctx.lineTo(bar.x + hw, y0); ctx.moveTo(bar.x - hw, y1); ctx.lineTo(bar.x + hw, y1); ctx.stroke(); ctx.restore();
+    });
+  });
+}};
+Chart.register(whiskers);
+
+let CMP, GATE;
+const S = { workload: 'get', pipeline: 1, conns: 2400, io_threads: 16, acl: 'both', rate: 0, pin: 0 };
+const pinLabel = v => v ? 'pinned' : 'unpinned';
+const rateLabel = r => r ? (r / 1000).toLocaleString() + 'k cmd/s' : 'saturation';
+
+function seg(id, key, items, fmt = String) {
+  const el = $(id);
+  el.innerHTML = items.map(v => `<button data-v="${v}" class="${String(S[key]) === String(v) ? 'on' : ''}">${fmt(v)}</button>`).join('');
+  el.querySelectorAll('button').forEach(b => b.onclick = () => {
+    const raw = b.dataset.v; S[key] = (key === 'acl' || key === 'workload') ? raw : +raw;
+    el.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    render();
+  });
+}
+
+const buildIdx = id => CMP.builds.findIndex(b => b.id === id);
+const buildOf = id => CMP.builds[buildIdx(id)];
+const color = (id, acl) => hexA(BUILD_COLORS[buildIdx(id) % BUILD_COLORS.length], acl ? 0.55 : 0.95);
+const rowLabel = (id, acl) => `${buildOf(id).label}${acl ? ' + ACL' : ''}`;
+// closed-loop cell whose main thread stayed below the gate: not a server comparison. Fixed-rate cells are
+// not expected to saturate; there validity means the generator delivered the rate (n_valid).
+const unsat = c => c && !c.rate && c.main_mean != null && c.main_mean < GATE;
+const aclList = () => S.acl === 'both' ? [0, 1] : [S.acl === 'on' ? 1 : 0];
+
+function find(build, acl, w, p, conns, iot, rate = S.rate) {
+  return CMP.cells.find(c => c.build === build && c.acl === acl && c.workload === w && c.pipeline === p && c.conns === conns && c.io_threads === iot && (c.rate || 0) === rate && (c.pin || 0) === S.pin);
+}
+// builds × acl that have any data at all for the selected p/conns/iot/rate (any workload)
+function rows() {
+  const out = [];
+  for (const b of CMP.builds) for (const acl of aclList()) {
+    if (CMP.cells.some(c => c.build === b.id && c.acl === acl && c.pipeline === S.pipeline && c.conns === S.conns && c.io_threads === S.io_threads && (c.rate || 0) === S.rate && (c.pin || 0) === S.pin)) out.push({ build: b.id, acl });
+  }
+  return out;
+}
+// The stock reference is the build named `stock` when published, else the first build whose id starts with
+// `stock`, else the first build; a build's own `ref` (builds.json) wins when that build is in the payload.
+const stockId = () => { const b = CMP.builds.find(b => b.id === 'stock') || CMP.builds.find(b => /^stock/.test(b.id)) || CMP.builds[0]; return b ? b.id : 'stock'; };
+const refBuild = build => { const r = (buildOf(build) || {}).ref; return r && buildOf(r) ? r : stockId(); };
+const isRef = build => refBuild(build) === build;
+// Δ is against the build's own reference; the reference's ACL-off row has nothing to compare to, and its
+// ACL-on row shows the ACL tax vs its own ACL-off row.
+function refFor(build, acl, w, p, conns, iot, rate = S.rate) {
+  const ref = refBuild(build);
+  if (isRef(build) && !acl) return null;
+  return find(ref, isRef(build) ? 0 : acl, w, p, conns, iot, rate);
+}
+function delta(c, ref) { return c && ref && c.mean && ref.mean ? (c.mean / ref.mean - 1) * 100 : null; }
+function pct(c) { return c && c.ci95_pct != null ? `±${c.ci95_pct.toFixed(1)}%` : ''; }
+function mainCell(c) { if (!c || c.main_mean == null) return '<span class="mut">–</span>'; const u = unsat(c); return `<span class="${u ? 'unsat' : ''}">${c.main_mean.toFixed(0)}%${u ? ' <span class="pill low">unsat</span>' : ''}</span>`; }
+
+function renderScenario() {
+  const { workload: w, pipeline: p, conns, io_threads: iot } = S;
+  $('scenTitle').textContent = `Scenario: ${w.toUpperCase()} · P${p} · ${conns} conns · ${iot} io-threads · ACL ${S.acl} · ${rateLabel(S.rate)} · ${pinLabel(S.pin)}`;
+  const rs = rows().map(r => ({ ...r, c: find(r.build, r.acl, w, p, conns, iot) })).filter(r => r.c);
+  const stock0 = find(stockId(), 0, w, p, conns, iot);
+  if (!rs.length) { $('scenTable').innerHTML = '<div class="empty">nothing measured at this configuration</div>'; mkChart('scenChart', { type: 'bar', data: { labels: [], datasets: [] } }); return; }
+  $('scenTable').innerHTML = `<table><thead><tr><th>build</th><th>commit</th><th>k cmd/s</th><th>±CI</th><th>main</th><th>reps</th><th>Δ</th><th>Δ<sub>stock</sub></th><th>session</th></tr></thead><tbody>` +
+    rs.map(({ build, acl, c }) => {
+      const d = delta(c, refFor(build, acl, w, p, conns, iot)), d0 = (isRef(build) && !acl) ? null : delta(c, stock0);
+      const u = unsat(c) ? 'unsat' : '';
+      return `<tr><td><span class="sw" style="background:${color(build, acl)}"></span>${buildOf(build).label}${acl ? '<span class="pill acl">ACL</span>' : ''}</td>
+        <td class="mut">${buildOf(build).commit}</td><td class="${u}" style="font-weight:650">${fmtK(c.mean)}</td><td class="mut">${pct(c)}</td><td>${mainCell(c)}</td>
+        <td class="mut">${c.n_valid}/${c.n}${c.n_failed ? ` <span class="pill low" title="generator never came up">+${c.n_failed} failed</span>` : ""}</td><td class="delta" style="background:${deltaColor(d)}">${fmtP(d)}</td><td class="delta" style="background:${deltaColor(d0)}">${fmtP(d0)}</td><td class="mut">${c.session}</td></tr>`;
+    }).join('') + '</tbody></table>';
+  mkChart('scenChart', {
+    type: 'bar',
+    data: { labels: rs.map(r => rowLabel(r.build, r.acl)),
+      datasets: [{ data: rs.map(r => r.c.mean), ci: rs.map(r => r.c.ci95_pct != null ? r.c.mean * r.c.ci95_pct / 100 : null),
+        backgroundColor: rs.map(r => unsat(r.c) ? hexA(BUILD_COLORS[buildIdx(r.build) % BUILD_COLORS.length], 0.18) : color(r.build, r.acl)),
+        borderColor: rs.map(r => color(r.build, r.acl)), borderWidth: rs.map(r => unsat(r.c) ? 1.5 : 0), borderDash: [4, 3] }] },
+    options: { maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => { const c = rs[ctx.dataIndex].c; return `${fmtK(c.mean)} k cmd/s ${pct(c)} · main ${c.main_mean?.toFixed(0) ?? '?'}% · ${c.n_valid}/${c.n} valid`; } } } },
+      scales: { y: { beginAtZero: true, title: { display: true, text: 'k cmd/s' } }, x: { ticks: { autoSkip: false, maxRotation: 30 } } } }
+  });
+}
+
+function renderLatency() {
+  const { workload: w, pipeline: p, conns, io_threads: iot } = S;
+  const rs = rows().map(r => ({ ...r, c: find(r.build, r.acl, w, p, conns, iot) })).filter(r => r.c && r.c.latency);
+  if (!rs.length) {
+    $('latTable').innerHTML = '<div class="empty">no latency recorded for this scenario (older sessions did not keep cachecannon\'s samples)</div>';
+    mkChart('latChart', { type: 'bar', data: { labels: [], datasets: [] } }); return;
+  }
+  const refFor2 = (build, acl) => refFor(build, acl, w, p, conns, iot);
+  const F = ['p50_us', 'p90_us', 'p99_us', 'p999_us', 'p9999_us', 'max_us'];
+  const pname = f => f.replace('_us', '').replace('p9999', 'p99.99').replace('p999', 'p99.9');
+  $('latTable').innerHTML = `<table><thead><tr><th>build</th><th>k cmd/s</th><th>main</th>${F.map(f => `<th>${pname(f)}</th>`).join('')}<th>Δ p99</th><th>reps</th></tr></thead><tbody>` +
+    rs.map(({ build, acl, c }) => { const L = c.latency, ref = refFor2(build, acl), d = ref && ref.latency ? (L.p99_us / ref.latency.p99_us - 1) * 100 : null;
+      return `<tr><td><span class="sw" style="background:${color(build, acl)}"></span>${buildOf(build).label}${acl ? '<span class="pill acl">ACL</span>' : ''}</td><td class="${unsat(c) ? 'unsat' : ''}">${fmtK(c.mean)}</td><td class="mut">${c.main_mean == null ? '–' : c.main_mean.toFixed(0) + '%'}</td>` +
+        F.map(f => { const r = L.range && L.range[f]; const tip = r ? ` title="reps: ${fmtK(r[0])} – ${fmtK(r[1])} µs"` : '';
+          return `<td${tip} ${f === 'p99_us' ? 'style="font-weight:650"' : ''}>${fmtK(L[f])}</td>`; }).join('') +
+        `<td class="delta" style="background:${deltaColor(d == null ? null : -d)}">${fmtP(d)}</td><td class="mut">${L.n}/${c.n}</td></tr>`; }).join('') + '</tbody></table>';
+  const P = [['p50_us', 0.95], ['p90_us', 0.8], ['p99_us', 0.65], ['p999_us', 0.5], ['p9999_us', 0.35], ['max_us', 0.2]];
+  mkChart('latChart', {
+    type: 'bar',
+    data: { labels: rs.map(r => rowLabel(r.build, r.acl)),
+      datasets: P.map(([f, a]) => ({ label: pname(f), data: rs.map(r => r.c.latency[f]),
+        range: rs.map(r => r.c.latency.range && r.c.latency.range[f] ? r.c.latency.range[f] : null),
+        backgroundColor: rs.map(r => hexA(BUILD_COLORS[buildIdx(r.build) % BUILD_COLORS.length], a)), borderColor: rs.map(r => color(r.build, r.acl)), borderWidth: 1 })) },
+    options: { maintainAspectRatio: false, plugins: { legend: { position: 'bottom' },
+        tooltip: { callbacks: { label: ctx => { const r = ctx.dataset.range && ctx.dataset.range[ctx.dataIndex]; return `${ctx.dataset.label}: ${fmtK(ctx.raw)} µs` + (r ? ` (reps ${fmtK(r[0])} – ${fmtK(r[1])})` : ''); } } } },
+      scales: { y: { type: 'logarithmic', title: { display: true, text: 'µs (log)' } }, x: { ticks: { autoSkip: false, maxRotation: 30 } } } }
+  });
+}
+
+function render() { renderScenario(); renderLatency(); }
+
+function init(data) {
+  CMP = data.compare; GATE = data.metadata.saturation_pct; $('gate').textContent = GATE;
+  seg('cWorkload', 'workload', CMP.dims.workload);
+  seg('cPipeline', 'pipeline', CMP.dims.pipeline, v => 'P' + v);
+  seg('cConns', 'conns', CMP.dims.conns);
+  seg('cIot', 'io_threads', CMP.dims.io_threads);
+  seg('cAcl', 'acl', ['off', 'on', 'both']);
+  seg('cRate', 'rate', CMP.dims.rate || [0], rateLabel);
+  seg('cPin', 'pin', CMP.dims.pin || [0], pinLabel);
+  render();
+}
+if (window.OFFBENCH_DATA) init(window.OFFBENCH_DATA);
+else fetch('data/dashboard.json?ts=' + Date.now()).then(r => r.json()).then(init).catch(e => { $('scenTable').innerHTML = '<div class="empty">failed to load data/dashboard.json: ' + e + '</div>'; });
+</script>
+</body>
+</html>

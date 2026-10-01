@@ -1,0 +1,180 @@
+//! Verbose tracing-style formatter.
+
+use super::format::{format_bandwidth_bps, format_pct};
+use super::{OutputFormatter, Results, Sample};
+use crate::config::Config;
+use std::time::Duration;
+
+/// Verbose formatter using tracing-style output.
+pub struct VerboseFormatter;
+
+impl VerboseFormatter {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for VerboseFormatter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OutputFormatter for VerboseFormatter {
+    fn print_config(&self, config: &Config) {
+        tracing::info!("starting cachecannon");
+        tracing::info!("endpoints: {:?}", config.target.endpoints);
+        tracing::info!("protocol: {:?}", config.target.protocol);
+        tracing::info!("tls: {}", config.target.tls);
+        tracing::info!("threads: {}", config.general.threads);
+        tracing::info!(
+            "connections: {} (total)",
+            config.connection.total_connections()
+        );
+        tracing::info!("pipeline_depth: {}", config.connection.pipeline_depth);
+        tracing::info!(
+            "keyspace: {} keys, {} bytes each",
+            config.workload.keyspace.count,
+            config.workload.keyspace.length
+        );
+        tracing::info!("value_size: {} bytes", config.workload.values.length);
+        tracing::info!("io_engine: ringline ({})", crate::output::IO_ENGINE);
+        // The geometry that decides whether a response lands in one buffer or
+        // several, and how many can land at once per worker. Printed because it
+        // is derived rather than configured by default, and because it is the
+        // first thing to check when reported latency outruns the target's own.
+        let (ring_size, buffer_size) = crate::runner::resolved_recv_geometry(config);
+        let per_response = (config.workload.values.length as u32)
+            .div_ceil(buffer_size)
+            .max(1);
+        tracing::info!(
+            "recv_buffer: {} x {} bytes per worker ({} buffer{} per response)",
+            ring_size,
+            buffer_size,
+            per_response,
+            if per_response == 1 { "" } else { "s" }
+        );
+        if let Some(ref cpu_list) = config.general.cpu_list {
+            tracing::info!("cpu_list: {}", cpu_list);
+        }
+        if let Some(rate) = config.workload.rate_limit {
+            tracing::info!("rate_limit: {} req/s", rate);
+        }
+    }
+
+    fn print_warmup(&self, duration: Duration) {
+        tracing::info!("warming up for {}s...", duration.as_secs());
+    }
+
+    fn print_running(&self, duration: Duration) {
+        tracing::info!("warmup complete, running for {}s", duration.as_secs());
+    }
+
+    fn print_header(&self) {
+        // Verbose format doesn't use a table header
+    }
+
+    fn print_sample(&self, sample: &Sample) {
+        tracing::info!(
+            "rate={:.0}/s err={:.0}/s hit%={} p50={:.0}us p90={:.0}us p99={:.0}us p99.9={:.0}us p99.99={:.0}us max={:.0}us",
+            sample.req_per_sec,
+            sample.err_per_sec,
+            format_pct(sample.hit_pct),
+            sample.p50_us,
+            sample.p90_us,
+            sample.p99_us,
+            sample.p999_us,
+            sample.p9999_us,
+            sample.max_us,
+        );
+    }
+
+    fn print_results(&self, results: &Results) {
+        let throughput = results.throughput();
+        let err_pct = results.err_pct();
+        let hit_pct = results.hit_pct();
+        let rx_bps = results.rx_bps();
+        let tx_bps = results.tx_bps();
+
+        tracing::info!("=== Final Results ===");
+        tracing::info!("duration: {:.0}s", results.duration_secs);
+        tracing::info!("requests: {}", results.requests);
+        tracing::info!("responses: {}", results.responses);
+        tracing::info!("errors: {} ({}%)", results.errors, format_pct(err_pct));
+        tracing::info!("throughput: {:.2} req/s", throughput);
+        tracing::info!(
+            "bandwidth: {} RX, {} TX",
+            format_bandwidth_bps(rx_bps),
+            format_bandwidth_bps(tx_bps)
+        );
+        tracing::info!(
+            "hit_rate: {}% ({} hits, {} misses)",
+            format_pct(hit_pct),
+            results.hits,
+            results.misses
+        );
+        tracing::info!(
+            "GET latency: p50={:.0}us p90={:.0}us p99={:.0}us p99.9={:.0}us p99.99={:.0}us max={:.0}us",
+            results.get_latencies.p50_us,
+            results.get_latencies.p90_us,
+            results.get_latencies.p99_us,
+            results.get_latencies.p999_us,
+            results.get_latencies.p9999_us,
+            results.get_latencies.max_us,
+        );
+        if results.get_ttfb.p50_us > 0.0 {
+            tracing::info!(
+                "GET TTFB:    p50={:.0}us p90={:.0}us p99={:.0}us p99.9={:.0}us p99.99={:.0}us max={:.0}us",
+                results.get_ttfb.p50_us,
+                results.get_ttfb.p90_us,
+                results.get_ttfb.p99_us,
+                results.get_ttfb.p999_us,
+                results.get_ttfb.p9999_us,
+                results.get_ttfb.max_us,
+            );
+        }
+        tracing::info!(
+            "SET latency: p50={:.0}us p90={:.0}us p99={:.0}us p99.9={:.0}us p99.99={:.0}us max={:.0}us",
+            results.set_latencies.p50_us,
+            results.set_latencies.p90_us,
+            results.set_latencies.p99_us,
+            results.set_latencies.p999_us,
+            results.set_latencies.p9999_us,
+            results.set_latencies.max_us,
+        );
+        // CO-honest sections — suppressed when there is no rate limit (slip ≡ 0)
+        if results.schedule_slip.p99_us > 0.0 || results.requests_dropped > 0 {
+            tracing::info!(
+                "schedule_slip: p50={:.0}us p90={:.0}us p99={:.0}us p99.9={:.0}us p99.99={:.0}us max={:.0}us",
+                results.schedule_slip.p50_us,
+                results.schedule_slip.p90_us,
+                results.schedule_slip.p99_us,
+                results.schedule_slip.p999_us,
+                results.schedule_slip.p9999_us,
+                results.schedule_slip.max_us,
+            );
+            tracing::info!(
+                "perceived_latency: p50={:.0}us p90={:.0}us p99={:.0}us p99.9={:.0}us p99.99={:.0}us max={:.0}us",
+                results.perceived_latency.p50_us,
+                results.perceived_latency.p90_us,
+                results.perceived_latency.p99_us,
+                results.perceived_latency.p999_us,
+                results.perceived_latency.p9999_us,
+                results.perceived_latency.max_us,
+            );
+            if results.requests_dropped > 0 {
+                tracing::info!(
+                    "overload: {} of {} offered dropped ({:.1}%)",
+                    results.requests_dropped,
+                    results.offered(),
+                    results.overload_pct()
+                );
+            }
+        }
+        tracing::info!(
+            "connections: {} active, {} failed",
+            results.conns_active,
+            results.conns_failed
+        );
+    }
+}

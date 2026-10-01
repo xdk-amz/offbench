@@ -1,0 +1,181 @@
+[package]
+name = "cachecannon"
+version = "0.0.25-alpha.0"
+authors = ["Brian Martin <brayniac@gmail.com>"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cachecannon/cachecannon"
+description = "High-performance cache protocol benchmark tool"
+
+[dependencies]
+# Metrics query engine (used by viewer)
+metriken-query = { version = "0.9", features = ["http"] }
+
+# Configuration
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+
+# Time/Date
+chrono = { version = "0.4", features = ["serde"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async runtime (used by viewer and admin server)
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+
+# Viewer dependencies
+arrow = "58"
+parquet = "58"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["compression-gzip", "decompression-gzip"] }
+tower-livereload = "0.9"
+include_dir = "0.7"
+open = "5"
+tracing-appender = "0.2"
+http = "1"
+
+# Signal handling
+ctrlc = { version = "3", features = ["termination"] }
+
+# I/O event loop (io_uring on Linux, mio on other platforms)
+# 0.6.2 minimum: `ConfigBuilder::loop_diag` (gates the per-worker
+# `[ringline diag]` shutdown lines behind `general.ringline_diag`). Carries
+# forward the 0.6.1 io_uring liveness fix where a worker reaped zero
+# completions for as long as any task stayed runnable (under DEFER_TASKRUN
+# neither the non-blocking submit nor the skipped flush set GETEVENTS), so no
+# send-pool slots were recycled and a wait-for-capacity loop never woke.
+ringline = "0.6.2"
+
+# Consistent hashing
+ketama = "0.0.1"
+
+# Channels
+crossbeam-channel = "0.5"
+
+# Protocol implementations
+# Must stay in lockstep with the `resp-proto` that `ringline-redis` depends on.
+# These are pre-1.0, so 0.0.1 and 0.0.2 are semver-incompatible: a mismatch
+# puts two copies in the graph and `Request` from one will not typecheck
+# against the other's `cmd()`.
+resp-proto = { version = "0.0.2", features = ["resp3"] }
+
+# Client crates
+# 0.7.0 minimum: the ringline 0.6.0 coordinated breaking release (opaque
+# PoolConfig, `ConnCtx: !Send`, `recv_accumulator_max` defaulting to 1 GiB).
+# Carries forward the 0.6.5 RESP3 null (`_\r\n`) GET-miss parsing (ringline
+# #294) and the uniform recv_meta reply-metadata path (RespMeta / recv_meta,
+# ringline #288, 0.6.4).
+ringline-redis = "0.7.0"
+ringline-memcache = "0.7.1"
+ringline-ping = "0.6.0"
+# `search` feature only: ann-benchmarks HDF5 datasets (static build, no system libhdf5)
+hdf5-metno = { version = "0.13", features = ["static"], optional = true }
+ndarray = { version = "0.17", optional = true }
+
+# Metrics
+histogram = "1.1"
+metriken = "0.9"
+metriken-exposition = { version = "0.16", features = ["parquet", "msgpack"] }
+
+# TLS
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+webpki-roots = "0.26"
+
+# Rate limiting
+ratelimit = "2.0.0"
+
+# Utilities
+bytes = "1.11.1"
+libc = "0.2"
+socket2 = { version = "0.5", features = ["all"] }
+
+# RNG for workload generation
+rand = "0.9"
+rand_xoshiro = "0.7"
+rand_distr = "0.5"
+
+# Kernel SO_TIMESTAMPING support is Linux-only.
+[target.'cfg(target_os = "linux")'.dependencies]
+ringline = { version = "0.6.2", features = ["timestamps"] }
+ringline-redis = { version = "0.7.0", features = ["timestamps"] }
+ringline-memcache = { version = "0.7.1", features = ["timestamps"] }
+ringline-ping = { version = "0.6.0", features = ["timestamps"] }
+
+# Jemalloc allocator (glibc only — not needed on musl/macOS/Windows).
+tikv-jemallocator = "0.6"
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
+
+[features]
+default = []
+# Vector-search benchmarking (`valkey-lab search`). Gated so the core binaries
+# don't pull in HDF5; the bundled build needs cmake >= 3.26.
+search = ["dep:hdf5-metno", "dep:ndarray"]
+
+[[bin]]
+name = "cachecannon"
+path = "src/main.rs"
+
+[[bin]]
+name = "valkey-lab"
+path = "src/valkey_lab.rs"
+
+[package.metadata.deb]
+name = "cachecannon"
+maintainer = "Brian Martin <brayniac@gmail.com>"
+section = "net"
+priority = "optional"
+assets = [
+    ["target/release/cachecannon", "usr/bin/", "755"],
+    ["config/example.toml", "etc/cachecannon/benchmark.toml.example", "644"],
+]
+
+[package.metadata.deb.variants.valkey-lab]
+name = "valkey-lab"
+assets = [
+    ["target/release/valkey-lab", "usr/bin/", "755"],
+]
+
+[package.metadata.deb.variants.cachecannon-dbgsym]
+name = "cachecannon-dbgsym"
+section = "debug"
+assets = [
+    ["target/release/cachecannon.debug", "usr/lib/debug/usr/bin/", "644"],
+]
+
+[package.metadata.deb.variants.valkey-lab-dbgsym]
+name = "valkey-lab-dbgsym"
+section = "debug"
+assets = [
+    ["target/release/valkey-lab.debug", "usr/lib/debug/usr/bin/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "cachecannon"
+assets = [
+    { source = "target/release/cachecannon", dest = "/usr/bin/cachecannon", mode = "0755" },
+    { source = "config/example.toml", dest = "/etc/cachecannon/benchmark.toml.example", mode = "0644", config = true },
+]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = true
+
+[dev-dependencies]
+# Decodes what `/metrics/binary` serves. The consumer that matters is
+# `rezolus record`, which links metriken-exposition 0.19 against our 0.16 --
+# that pairing cannot be tested in this graph (metriken-core sets `links`, so
+# two versions cannot coexist), so `dump_msgpack_fixture` writes the bytes for
+# an out-of-tree decode and this dep covers the in-graph half.
+rmp-serde = "1"

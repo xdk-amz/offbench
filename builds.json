@@ -1,0 +1,333 @@
+{
+ "_doc": "Builds shown on the compare page, in display order. For each (build, acl, cell) the FIRST source with reps wins; later sources only fill cells the earlier ones lack (no cross-session pooling).",
+ "builds": [
+  {
+   "id": "stock",
+   "label": "stock valkey",
+   "commit": "e082696cf",
+   "branch": "unstable (merge-base)",
+   "sources": [
+    {
+     "session": "ccmatrix_latency",
+     "bin": "base"
+    },
+    {
+     "session": "ccmatrix_acl",
+     "bin": "base"
+    },
+    {
+     "session": "ccsweep_p1",
+     "bin": "base"
+    },
+    {
+     "session": "ccsweep_p16",
+     "bin": "base"
+    },
+    {
+     "session": "ccmatrix_wl",
+     "bin": "base"
+    },
+    {
+     "session": "ccmatrix_default",
+     "bin": "base"
+    },
+    {
+     "session": "ccmatrix_fix3",
+     "bin": "base"
+    }
+   ]
+  },
+  {
+   "id": "stock-dcc66eff8",
+   "label": "stock valkey (unstable dcc66eff8)",
+   "commit": "dcc66eff8",
+   "branch": "unstable",
+   "sources": [
+    {
+     "session": "ccmatrix_full_stock-dcc66eff8_acl0",
+     "bin": "stock-dcc66eff8"
+    },
+    {
+     "session": "ccmatrix_full_stock-dcc66eff8_acl1",
+     "bin": "stock-dcc66eff8"
+    }
+   ],
+   "ref": "stock"
+  },
+  {
+   "id": "stock-dcc66eff8-pin",
+   "label": "stock valkey (unstable dcc66eff8), pinned + IRQ isolated",
+   "commit": "dcc66eff8",
+   "branch": "unstable",
+   "sources": [
+    {
+     "session": "20260929T000604.973Z",
+     "bin": "stock-dcc66eff8"
+    },
+    {
+     "session": "20260929T000604.973Z-p2",
+     "bin": "stock-dcc66eff8"
+    },
+    {
+     "session": "20260929T000604.973Z-p3",
+     "bin": "stock-dcc66eff8"
+    },
+    {
+     "session": "20260929T000604.973Z-p4",
+     "bin": "stock-dcc66eff8"
+    },
+    {
+     "session": "20260929T000617.266Z",
+     "bin": "stock-dcc66eff8"
+    },
+    {
+     "session": "20260929T000617.266Z-p2",
+     "bin": "stock-dcc66eff8"
+    },
+    {
+     "session": "20260929T000617.266Z-p3",
+     "bin": "stock-dcc66eff8"
+    },
+    {
+     "session": "20260929T000617.266Z-p4",
+     "bin": "stock-dcc66eff8"
+    },
+    {
+     "session": "ccmatrix_pin_stock-dcc66eff8",
+     "bin": "stock-dcc66eff8"
+    }
+   ],
+   "ref": "stock"
+  },
+  {
+   "id": "stock-77b00b2dd",
+   "label": "stock valkey (unstable 77b00b2dd)",
+   "commit": "77b00b2dd",
+   "branch": "unstable (rebase base)",
+   "sources": [
+    {
+     "session": "ccmatrix_all",
+     "bin": "stock-77b00b2dd"
+    }
+   ],
+   "ref": "stock"
+  },
+  {
+   "id": "simplify",
+   "label": "simplify (original offload)",
+   "commit": "1734e8949",
+   "branch": "main-thread-offload-simplify",
+   "sources": [
+    {
+     "session": "ccmatrix_acl",
+     "bin": "preacl"
+    },
+    {
+     "session": "ccmatrix_fix3",
+     "bin": "branchfix"
+    },
+    {
+     "session": "ccmatrix_fix",
+     "bin": "branchfix"
+    },
+    {
+     "session": "ccsweep_p1",
+     "bin": "branchfix"
+    },
+    {
+     "session": "ccsweep_p16",
+     "bin": "branchfix"
+    }
+   ]
+  },
+  {
+   "id": "command-origin",
+   "label": "command-origin + ACL fix",
+   "commit": "adb453b14",
+   "branch": "main-thread-offload-command-origin",
+   "sources": [
+    {
+     "session": "ccmatrix_acl",
+     "bin": "acl"
+    },
+    {
+     "session": "ccmatrix_wl",
+     "bin": "wlbase"
+    }
+   ]
+  },
+  {
+   "id": "worker-lifecycle",
+   "label": "worker-lifecycle",
+   "commit": "2b5d42831",
+   "branch": "main-thread-offload-worker-lifecycle",
+   "sources": [
+    {
+     "session": "clientcontrol-hot-final-ab",
+     "bin": "ccbase"
+    },
+    {
+     "session": "ccmatrix_wl",
+     "bin": "wlnew"
+    }
+   ]
+  },
+  {
+   "id": "client-control",
+   "label": "client-control (latest, hot-path fix)",
+   "commit": "06bc7d34a",
+   "branch": "main-thread-offload-client-control",
+   "sources": [
+    {
+     "session": "ccmatrix_latency",
+     "bin": "cc06bc7d34"
+    },
+    {
+     "session": "clientcontrol-hot-final-ab",
+     "bin": "ccfixed"
+    }
+   ]
+  },
+  {
+   "id": "deferred-fifo",
+   "label": "deferred-fifo (Issue #3)",
+   "commit": "7739ed905",
+   "branch": "main-thread-offload-deferred-fifo",
+   "sources": [
+    {
+     "session": "ccmatrix_fifo",
+     "bin": "cc7739ed90"
+    }
+   ]
+  },
+  {
+   "id": "offload-all",
+   "label": "offload-all (8 commits rebased on 77b00b2dd)",
+   "commit": "ff47ac1d1",
+   "branch": "main-thread-offload-all",
+   "sources": [
+    {
+     "session": "ccmatrix_all",
+     "bin": "all-ff47ac1d1"
+    }
+   ],
+   "ref": "stock-77b00b2dd"
+  },
+  {
+   "id": "offload-all-3f1ac915d",
+   "label": "offload-all (3f1ac915d)",
+   "commit": "3f1ac915d",
+   "branch": "main-thread-offload-all",
+   "sources": [
+    {
+     "session": "ccmatrix_full_3f1ac915d",
+     "bin": "all-3f1ac915d"
+    }
+   ],
+   "ref": "stock-77b00b2dd"
+  },
+  {
+   "id": "offload-replica-reads",
+   "label": "offload-all+replica-reads (902371a44)",
+   "commit": "902371a44",
+   "branch": "main-thread-offload-replica-reads",
+   "ref": "offload-all-3f1ac915d",
+   "sources": [
+    {
+     "session": "ccmatrix_full_rr-902371a44",
+     "bin": "rr-902371a44"
+    }
+   ]
+  },
+  {
+   "id": "offload-all-3f1ac915d-pin",
+   "label": "offload-all (3f1ac915d), pinned + IRQ isolated",
+   "commit": "3f1ac915d",
+   "branch": "main-thread-offload-all",
+   "sources": [
+    {
+     "session": "20260929T000604.973Z",
+     "bin": "all-3f1ac915d"
+    },
+    {
+     "session": "20260929T000604.973Z-p2",
+     "bin": "all-3f1ac915d"
+    },
+    {
+     "session": "20260929T000604.973Z-p3",
+     "bin": "all-3f1ac915d"
+    },
+    {
+     "session": "20260929T000604.973Z-p4",
+     "bin": "all-3f1ac915d"
+    },
+    {
+     "session": "20260929T000617.266Z",
+     "bin": "all-3f1ac915d"
+    },
+    {
+     "session": "20260929T000617.266Z-p2",
+     "bin": "all-3f1ac915d"
+    },
+    {
+     "session": "20260929T000617.266Z-p3",
+     "bin": "all-3f1ac915d"
+    },
+    {
+     "session": "20260929T000617.266Z-p4",
+     "bin": "all-3f1ac915d"
+    },
+    {
+     "session": "ccmatrix_pin_all-3f1ac915d",
+     "bin": "all-3f1ac915d"
+    }
+   ],
+   "ref": "stock-dcc66eff8-pin"
+  },
+  {
+   "id": "offload-replica-reads-pin",
+   "label": "offload-all+replica-reads (902371a44), pinned + IRQ isolated",
+   "commit": "902371a44",
+   "branch": "main-thread-offload-replica-reads",
+   "sources": [
+    {
+     "session": "20260929T000604.973Z",
+     "bin": "rr-902371a44"
+    },
+    {
+     "session": "20260929T000604.973Z-p2",
+     "bin": "rr-902371a44"
+    },
+    {
+     "session": "20260929T000604.973Z-p3",
+     "bin": "rr-902371a44"
+    },
+    {
+     "session": "20260929T000604.973Z-p4",
+     "bin": "rr-902371a44"
+    },
+    {
+     "session": "20260929T000617.266Z",
+     "bin": "rr-902371a44"
+    },
+    {
+     "session": "20260929T000617.266Z-p2",
+     "bin": "rr-902371a44"
+    },
+    {
+     "session": "20260929T000617.266Z-p3",
+     "bin": "rr-902371a44"
+    },
+    {
+     "session": "20260929T000617.266Z-p4",
+     "bin": "rr-902371a44"
+    },
+    {
+     "session": "ccmatrix_pin_rr-902371a44",
+     "bin": "rr-902371a44"
+    }
+   ],
+   "ref": "offload-all-3f1ac915d-pin"
+  }
+ ]
+}

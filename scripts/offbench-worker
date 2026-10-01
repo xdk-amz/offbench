@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""offbench-worker: start one worker on this host (dispatches into runner.py).
+
+A thin, dependency-free convenience launcher equivalent to
+``python3 -m offbench [--root ROOT] run [run-args...]``. It exists so a host can
+start its worker with a single named command and so both entry forms
+(``python3 -m offbench run`` and ``offbench-worker``) land in the same place:
+``offbench.cli.cmd_run`` -> ``offbench.runner.Runner.loop``.
+
+Args are forwarded straight to the ``run`` subcommand, e.g.
+
+    offbench-worker --root ~/offbench --repo ~/valkey \
+        --cachecannon ~/offbench-src/offbench/vendor/cachecannon/target/release/cachecannon \
+        --cli ~/base/src/valkey-cli
+
+``--root`` may be given before ``run`` (top-level) or is accepted here and moved
+ahead of ``run`` for the parser. Pure stdlib; no install step required.
+"""
+
+import os
+import sys
+from pathlib import Path
+
+# Make the sibling ``offbench`` package importable when this script is invoked
+# by path (e.g. ~/offbench-src/scripts/offbench-worker) rather than from an
+# installed console entry. The package root is the parent of scripts/.
+_PKG_ROOT = Path(__file__).resolve().parent.parent
+if str(_PKG_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PKG_ROOT))
+
+from offbench.cli import main  # noqa: E402
+
+
+def _build_argv(args: list[str]) -> list[str]:
+    """Forward args to the ``run`` subcommand.
+
+    ``--root`` is a top-level option (it must precede the subcommand), so pull a
+    leading ``--root VALUE`` out of the caller's args and place it before
+    ``run``. Any other args pass through to ``run`` unchanged. If ``run`` is
+    already present the args are forwarded verbatim.
+    """
+    if "run" in args:
+        return args
+    pre: list[str] = []
+    rest = list(args)
+    if rest and rest[0] == "--root" and len(rest) >= 2:
+        pre = [rest[0], rest[1]]
+        rest = rest[2:]
+    elif rest and rest[0].startswith("--root="):
+        pre = [rest[0]]
+        rest = rest[1:]
+    return [*pre, "run", *rest]
+
+
+def main_worker(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    return main(_build_argv(argv))
+
+
+if __name__ == "__main__":
+    sys.exit(main_worker())

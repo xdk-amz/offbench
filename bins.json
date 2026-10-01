@@ -1,0 +1,110 @@
+{
+ "base": {
+  "commit": "e082696cf",
+  "branch": "unstable",
+  "label": "stock (merge-base)",
+  "role": "stock"
+ },
+ "branch": {
+  "commit": "49d9ec42c",
+  "branch": "main-thread-offload",
+  "label": "offload (reporter's)",
+  "role": "candidate"
+ },
+ "branchping": {
+  "commit": null,
+  "branch": "main-thread-offload",
+  "label": "offload +PING admit",
+  "role": "variant"
+ },
+ "branchfix": {
+  "commit": "1734e8949",
+  "branch": "main-thread-offload-simplify",
+  "label": "offload fixed (simplify)",
+  "role": "candidate"
+ },
+ "preacl": {
+  "commit": "1734e8949",
+  "branch": "main-thread-offload-simplify",
+  "label": "pre-ACL, ACL on",
+  "role": "variant"
+ },
+ "acl": {
+  "commit": "adb453b14",
+  "branch": "main-thread-offload-command-origin",
+  "label": "command-origin + ACL",
+  "role": "candidate"
+ },
+ "wlbase": {
+  "commit": "adb453b14",
+  "branch": "main-thread-offload-command-origin",
+  "label": "command-origin (wl base)",
+  "role": "candidate"
+ },
+ "wlnew": {
+  "commit": "2b5d42831",
+  "branch": "main-thread-offload-worker-lifecycle",
+  "label": "worker-lifecycle",
+  "role": "candidate"
+ },
+ "ccbase": {
+  "commit": "2b5d42831",
+  "branch": "main-thread-offload-worker-lifecycle",
+  "label": "worker-lifecycle (cc base)",
+  "role": "candidate"
+ },
+ "cccandidate": {
+  "commit": "a8f50bd2c",
+  "branch": "main-thread-offload-client-control",
+  "label": "client-control",
+  "role": "candidate"
+ },
+ "cc06bc7d34": {
+  "commit": "06bc7d34a",
+  "branch": "main-thread-offload-client-control",
+  "label": "client-control (hot-path fix)",
+  "role": "candidate"
+ },
+ "cc7739ed90": {
+  "commit": "7739ed905",
+  "branch": "main-thread-offload-deferred-fifo",
+  "label": "deferred-fifo (Issue #3)",
+  "role": "candidate"
+ },
+ "ccfixed": {
+  "commit": null,
+  "branch": "main-thread-offload-client-control",
+  "label": "client-control (fixed, WIP)",
+  "role": "variant"
+ },
+ "stock-77b00b2dd": {
+  "commit": "77b00b2dd",
+  "branch": "unstable",
+  "label": "stock (unstable 77b00b2dd)",
+  "role": "stock"
+ },
+ "all-ff47ac1d1": {
+  "commit": "ff47ac1d1",
+  "branch": "main-thread-offload-all",
+  "label": "offload-all (rebased on 77b00b2dd)",
+  "role": "candidate"
+ },
+ "all-3f1ac915d": {
+  "commit": "3f1ac915d",
+  "branch": "main-thread-offload-all",
+  "label": "offload-all (fpRead drain fix)",
+  "role": "candidate"
+ },
+ "rr-902371a44": {
+  "commit": "902371a44",
+  "branch": "main-thread-offload-replica-reads",
+  "label": "offload-all + rain replica reads",
+  "role": "candidate"
+ },
+ "stock-dcc66eff8": {
+  "commit": "dcc66eff8",
+  "branch": "unstable",
+  "label": "stock (unstable 2026-09-23)",
+  "role": "stock"
+ }
+}

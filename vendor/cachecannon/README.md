@@ -1,0 +1,174 @@
+# Cachecannon
+
+A high-performance load generator for cache servers with support for multiple protocols, detailed latency measurements, and flexible workload configuration.
+
+## Installation
+
+```bash
+curl -fsSL https://cachecannon.cc/install.sh | bash
+```
+
+This configures the package repository for your OS and installs cachecannon. Future updates come through `apt upgrade` or `dnf upgrade`. Supports Debian/Ubuntu and RHEL/Fedora on amd64 and arm64.
+
+<details>
+<summary>Other installation methods</summary>
+
+#### APT (Debian/Ubuntu)
+
+```bash
+curl -fsSL https://apt.cachecannon.cc/gpg-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/cachecannon-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/cachecannon-archive-keyring.gpg] https://apt.cachecannon.cc stable main" | sudo tee /etc/apt/sources.list.d/cachecannon.list
+sudo apt update && sudo apt install cachecannon
+```
+
+#### YUM/DNF (RHEL/Fedora)
+
+```bash
+sudo tee /etc/yum.repos.d/cachecannon.repo << 'EOF'
+[cachecannon-x86_64]
+name=Cachecannon
+baseurl=https://yum.cachecannon.cc/x86_64
+gpgcheck=1
+gpgkey=https://yum.cachecannon.cc/RPM-GPG-KEY-cachecannon
+enabled=1
+EOF
+sudo yum install cachecannon    # or: sudo dnf install cachecannon
+```
+
+For arm64/aarch64, replace `x86_64` with `aarch64` in the baseurl.
+
+#### GitHub Releases
+
+Pre-built `.deb` and `.rpm` packages are available from [GitHub Releases](https://github.com/cachecannon/cachecannon/releases) for amd64 and arm64. Each package includes a detached GPG signature (`.asc`).
+
+#### Build from source
+
+```bash
+cargo build --release
+# Binary is at ./target/release/cachecannon
+```
+
+Requires Rust 1.76+ and Linux 6.0+ (for io_uring support).
+
+</details>
+
+## Quick Start
+
+```bash
+# Run against a local Valkey or Redis server
+cachecannon config/valkey.toml
+
+# Run against a local Memcached server
+cachecannon config/memcache.toml
+
+# Save results to Parquet and view in the web dashboard
+cachecannon config/valkey.toml --parquet results.parquet
+cachecannon view results.parquet
+```
+
+## Features
+
+- **Multiple protocols** — Valkey/Redis RESP2/RESP3, Memcache ASCII/binary, Ping
+- **io_uring I/O** — Same high-performance ringline framework as the server (Linux 6.0+)
+- **Request pipelining** — Configurable pipeline depth per connection
+- **Latency histograms** — p50, p90, p99, p99.9, p99.99 with userspace or kernel timestamps
+- **[Prefill and backfill](docs/guide.md#prefill)** — Pre-populate the cache or auto-SET on miss (cache-aside)
+- **[Append stream](docs/guide.md#append-stream)** — Grow the keyspace in batches on a cadence, with newest-is-hottest reads
+- **[Saturation search](docs/guide.md#saturation-search)** — Automatically find max throughput that meets your latency SLO
+- **[Valkey/Redis Cluster](docs/guide.md#cluster-mode)** — Topology discovery, hash slot routing, MOVED redirect handling
+- **[Parquet output](docs/reference.md#parquet-output)** — Record all metrics for post-hoc analysis
+- **[Web dashboard](docs/reference.md#results-viewer)** — Interactive viewer with throughput, latency, cache, and connection charts
+- **[Rezolus correlation](docs/guide.md#correlating-with-rezolus)** — Overlay system telemetry (CPU, network, scheduler) on benchmark results
+- **CPU pinning** — Pin worker threads to specific cores for reproducible results
+
+## Command Line Interface
+
+```
+cachecannon <CONFIG> [OPTIONS]
+
+Arguments:
+  <CONFIG>  Path to TOML configuration file
+
+Options:
+  --parquet <PATH>      Override Parquet output path from config
+  -h, --help            Print help
+
+Subcommands:
+  view                  View benchmark results in a web dashboard
+```
+
+### Viewer
+
+```
+cachecannon view <INPUT> [OPTIONS]
+
+Arguments:
+  <INPUT>               Path to benchmark parquet file
+
+Options:
+  --server <PATH>       Path to server-side Rezolus parquet file
+  --client <PATH>       Path to client-side Rezolus parquet file
+  --listen <ADDR>       Listen address [default: 127.0.0.1:0]
+  -v, --verbose         Increase verbosity
+```
+
+## Choosing a Configuration
+
+**First time?** Start with `quick-test.toml` to verify connectivity, then move to `valkey.toml` or `memcache.toml` for a real benchmark:
+
+```bash
+# Verify everything works (5 seconds)
+cachecannon config/quick-test.toml
+
+# Run a full benchmark
+cachecannon config/valkey.toml
+```
+
+**Measuring capacity?** Use `saturation.toml` to automatically find the maximum throughput that meets your latency SLO.
+
+**Testing a specific server feature?** Use `eviction-test.toml` (eviction behavior), `desync-test.toml` (protocol correctness under high concurrency), or `valkey-cluster.toml` (cluster topology).
+
+**Need to customize?** Copy `example.toml` — it has every available option with comments.
+
+## Pre-built Configurations
+
+| Config | Description |
+|--------|-------------|
+| `quick-test.toml` | 5-second smoke test — start here to verify connectivity |
+| `valkey.toml` | Standard Valkey/Redis RESP protocol benchmark |
+| `memcache.toml` | Memcache protocol benchmark (ASCII; binary protocol shown as comment) |
+| `ping.toml` | Simple PING/PONG baseline latency test |
+| `example.toml` | Reference config with all available options commented |
+| `valkey-cluster.toml` | Valkey/Redis Cluster with topology discovery and prefill |
+| `saturation.toml` | Automated saturation search to find max SLO-compliant throughput |
+| `eviction-test.toml` | High write rate to trigger eviction cycles |
+| `desync-test.toml` | High concurrency stress test for protocol correctness (128 connections) |
+
+## Comparison with Other Tools
+
+| Feature | cachecannon | valkey-benchmark | memtier_benchmark |
+|---------|-------------------|-----------------|-------------------|
+| io_uring support | Yes | No | No |
+| Zero-copy send | Yes | No | No |
+| Multiple protocols | RESP, Memcache | RESP only | RESP, Memcache |
+| Parquet export | Yes | No | No |
+| Web dashboard | Yes | No | No |
+| Saturation search | Yes | No | No |
+| Prefill / backfill | Yes | No | No |
+| Cluster mode | Yes | Yes | Yes |
+| Zipfian distribution | Yes | No | Yes |
+| Pipelining | Yes | Yes | Yes |
+| CPU pinning | Yes | No | Yes |
+| End-to-end latency | Yes | TTFB only | Yes |
+
+## Documentation
+
+- **[Practical Guide](docs/guide.md)** — End-to-end walkthrough, workload patterns, prefill, backfill, saturation search, cluster mode, tuning, and troubleshooting
+- **[Configuration & Metrics Reference](docs/reference.md)** — Complete TOML configuration, output formats, dashboard charts, Parquet schema, and full metrics catalog
+
+## Development
+
+```bash
+cargo build --release          # Build release binary
+cargo test                     # Run tests
+```

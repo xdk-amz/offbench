@@ -1,0 +1,32 @@
+# CI configuration for Memcache over TLS (self-signed cert, private CA).
+#
+# Uses tls_ca_file rather than tls_verify = false so the run exercises real
+# certificate verification against the generated CA, not just the encrypted
+# transport.
+
+[general]
+duration = "5s"
+warmup = "2s"
+threads = 2
+
+[target]
+endpoints = ["127.0.0.1:11212"]
+protocol = "memcache-binary"
+tls = true
+tls_hostname = "localhost"
+tls_ca_file = "/tmp/memcache-tls/ca.crt"
+
+[connection]
+connections = 4
+pipeline_depth = 8
+
+[workload.keyspace]
+length = 16
+count = 10000
+
+[workload.commands]
+get = 80
+set = 20
+
+[workload.values]
+length = 64

@@ -1,0 +1,308 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build-deb-amd64:
+    name: Build .deb (amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-amd64
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+      - name: Build release binary
+        run: cargo build --release
+      - name: Extract debug info and strip binaries
+        run: |
+          for bin in cachecannon valkey-lab; do
+            objcopy --only-keep-debug target/release/$bin target/release/$bin.debug
+            objcopy --add-gnu-debuglink=target/release/$bin.debug target/release/$bin
+            strip target/release/$bin
+          done
+      - name: Build cachecannon .deb package
+        run: cargo deb --no-build --no-strip
+      - name: Build valkey-lab .deb package
+        run: cargo deb --no-build --no-strip --variant valkey-lab
+      - name: Build cachecannon-dbgsym .deb package
+        run: cargo deb --no-build --no-strip --variant cachecannon-dbgsym
+      - name: Build valkey-lab-dbgsym .deb package
+        run: cargo deb --no-build --no-strip --variant valkey-lab-dbgsym
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-amd64
+          path: target/debian/*.deb
+          retention-days: 7
+
+  build-deb-arm64:
+    name: Build .deb (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-arm64
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+      - name: Build release binary with cross
+        run: cross build --release --target aarch64-unknown-linux-gnu
+      - name: Install cross-arch binutils
+        run: |
+          # Drop the unused Chrome apt source; see the note in integration.yml.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y binutils-aarch64-linux-gnu
+      - name: Extract debug info and strip binaries
+        run: |
+          for bin in cachecannon valkey-lab; do
+            aarch64-linux-gnu-objcopy --only-keep-debug target/aarch64-unknown-linux-gnu/release/$bin target/aarch64-unknown-linux-gnu/release/$bin.debug
+            aarch64-linux-gnu-objcopy --add-gnu-debuglink=target/aarch64-unknown-linux-gnu/release/$bin.debug target/aarch64-unknown-linux-gnu/release/$bin
+            aarch64-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/$bin
+          done
+      - name: Build cachecannon .deb package
+        run: cargo deb --no-build --no-strip --target aarch64-unknown-linux-gnu
+      - name: Build valkey-lab .deb package
+        run: cargo deb --no-build --no-strip --target aarch64-unknown-linux-gnu --variant valkey-lab
+      - name: Build cachecannon-dbgsym .deb package
+        run: cargo deb --no-build --no-strip --target aarch64-unknown-linux-gnu --variant cachecannon-dbgsym
+      - name: Build valkey-lab-dbgsym .deb package
+        run: cargo deb --no-build --no-strip --target aarch64-unknown-linux-gnu --variant valkey-lab-dbgsym
+      - name: Upload .deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-arm64
+          path: target/aarch64-unknown-linux-gnu/debian/*.deb
+          retention-days: 7
+
+  build-rpm-amd64:
+    name: Build .rpm (amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-rpm-amd64
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm
+      - name: Build release binary
+        run: cargo build --release
+      - name: Extract debug info and strip binaries
+        run: |
+          for bin in cachecannon valkey-lab; do
+            objcopy --only-keep-debug target/release/$bin target/release/$bin.debug
+            objcopy --add-gnu-debuglink=target/release/$bin.debug target/release/$bin
+            strip target/release/$bin
+          done
+      - name: Build cachecannon .rpm package
+        run: cargo generate-rpm
+      - name: Build valkey-lab .rpm package
+        run: cargo generate-rpm -s 'name = "valkey-lab"' -s 'assets = [{source = "target/release/valkey-lab", dest = "/usr/bin/valkey-lab", mode = "0755"}]'
+      - name: Build cachecannon-debuginfo .rpm package
+        run: cargo generate-rpm -s 'name = "cachecannon-debuginfo"' -s 'assets = [{source = "target/release/cachecannon.debug", dest = "/usr/lib/debug/usr/bin/cachecannon.debug", mode = "0644"}]'
+      - name: Build valkey-lab-debuginfo .rpm package
+        run: cargo generate-rpm -s 'name = "valkey-lab-debuginfo"' -s 'assets = [{source = "target/release/valkey-lab.debug", dest = "/usr/lib/debug/usr/bin/valkey-lab.debug", mode = "0644"}]'
+      - name: Upload .rpm artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-amd64
+          path: target/generate-rpm/*.rpm
+          retention-days: 7
+
+  build-rpm-arm64:
+    name: Build .rpm (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-rpm-arm64
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm
+      - name: Build release binary with cross
+        run: cross build --release --target aarch64-unknown-linux-gnu
+      - name: Install cross-arch binutils
+        run: |
+          # Drop the unused Chrome apt source; see the note in integration.yml.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y binutils-aarch64-linux-gnu
+      - name: Extract debug info and strip binaries
+        run: |
+          for bin in cachecannon valkey-lab; do
+            aarch64-linux-gnu-objcopy --only-keep-debug target/aarch64-unknown-linux-gnu/release/$bin target/aarch64-unknown-linux-gnu/release/$bin.debug
+            aarch64-linux-gnu-objcopy --add-gnu-debuglink=target/aarch64-unknown-linux-gnu/release/$bin.debug target/aarch64-unknown-linux-gnu/release/$bin
+            aarch64-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/$bin
+          done
+      - name: Build cachecannon .rpm package
+        run: cargo generate-rpm --target aarch64-unknown-linux-gnu
+      - name: Build valkey-lab .rpm package
+        run: cargo generate-rpm --target aarch64-unknown-linux-gnu -s 'name = "valkey-lab"' -s 'assets = [{source = "target/aarch64-unknown-linux-gnu/release/valkey-lab", dest = "/usr/bin/valkey-lab", mode = "0755"}]'
+      - name: Build cachecannon-debuginfo .rpm package
+        run: cargo generate-rpm --target aarch64-unknown-linux-gnu -s 'name = "cachecannon-debuginfo"' -s 'assets = [{source = "target/aarch64-unknown-linux-gnu/release/cachecannon.debug", dest = "/usr/lib/debug/usr/bin/cachecannon.debug", mode = "0644"}]'
+      - name: Build valkey-lab-debuginfo .rpm package
+        run: cargo generate-rpm --target aarch64-unknown-linux-gnu -s 'name = "valkey-lab-debuginfo"' -s 'assets = [{source = "target/aarch64-unknown-linux-gnu/release/valkey-lab.debug", dest = "/usr/lib/debug/usr/bin/valkey-lab.debug", mode = "0644"}]'
+      - name: Upload .rpm artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-arm64
+          path: target/aarch64-unknown-linux-gnu/generate-rpm/*.rpm
+          retention-days: 7
+
+  sign-and-publish:
+    name: Sign and Publish
+    needs: [build-deb-amd64, build-deb-arm64, build-rpm-amd64, build-rpm-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download .deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: debs/
+          pattern: deb-*
+          merge-multiple: true
+      - name: Download .rpm artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: rpms/
+          pattern: rpm-*
+          merge-multiple: true
+      - name: List downloaded artifacts
+        run: |
+          echo "=== DEBs ==="
+          ls -la debs/
+          echo "=== RPMs ==="
+          ls -la rpms/
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)
+          echo "GPG_KEY_ID=$GPG_KEY_ID" >> $GITHUB_ENV
+      - name: Sign .rpm package headers
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          # Drop the unused Chrome apt source; see the note in integration.yml.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y rpm
+          # Diagnostics: rpm version and crypto backend (libgcrypt vs sequoia).
+          # Ubuntu 24.04's rpm verifies via Sequoia, which is far stricter than
+          # the GnuPG that creates the signature below.
+          rpm --version
+          echo "pgp backend: $(rpm --eval '%{?_pgpbackend}')"
+          # Allow non-interactive (loopback) pinentry for the passphrase-protected key
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          gpg-connect-agent reloadagent /bye
+          # rpmsign drives gpg via these macros; %{...} are rpm macros (not shell).
+          # Force SHA-256 for the signature digest so the Sequoia verifier accepts it.
+          cat > ~/.rpmmacros <<EOF
+          %_signature gpg
+          %_gpg_name ${GPG_KEY_ID}
+          %_gpg_digest_algo sha256
+          %__gpg_sign_cmd %{__gpg} gpg --batch --no-armor --pinentry-mode loopback --passphrase "${GPG_PASSPHRASE}" --no-secmem-warning --digest-algo SHA256 -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
+          EOF
+          for rpm in rpms/*.rpm; do
+            echo "Signing header: $rpm"
+            rpmsign --addsign "$rpm"
+          done
+          # Verify the embedded header signatures against the public key. Import
+          # and verify both as root so they share the same rpmdb keyring, and use
+          # -v so a failure reports which sub-check (header/payload/digest) failed.
+          gpg --armor --export "${GPG_KEY_ID}" > /tmp/RPM-GPG-KEY-cachecannon
+          sudo rpm --import /tmp/RPM-GPG-KEY-cachecannon
+          sudo rpm -q gpg-pubkey --qf '%{NAME}-%{VERSION}-%{RELEASE} %{SUMMARY}\n'
+          for rpm in rpms/*.rpm; do
+            sudo rpm --checksig -v "$rpm"
+          done
+      - name: Sign .deb packages
+        run: |
+          for deb in debs/*.deb; do
+            echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --passphrase-fd 0 \
+              --default-key ${{ env.GPG_KEY_ID }} \
+              --detach-sign --armor "$deb"
+          done
+      - name: Sign .rpm packages
+        run: |
+          for rpm in rpms/*.rpm; do
+            echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --passphrase-fd 0 \
+              --default-key ${{ env.GPG_KEY_ID }} \
+              --detach-sign --armor "$rpm"
+          done
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Install repository tools
+        run: |
+          # Drop the unused Chrome apt source; see the note in integration.yml.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y apt-utils createrepo-c
+      - name: Publish to S3 APT repository
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET_APT }}
+          GPG_KEY_ID: ${{ env.GPG_KEY_ID }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          chmod +x scripts/publish-apt.sh
+          ./scripts/publish-apt.sh
+      - name: Publish to S3 YUM repository
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET_YUM }}
+          GPG_KEY_ID: ${{ env.GPG_KEY_ID }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          chmod +x scripts/publish-yum.sh
+          ./scripts/publish-yum.sh
+      - name: Invalidate CloudFront caches
+        run: |
+          if [ -n "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID_APT }}" ]; then
+            aws cloudfront create-invalidation \
+              --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID_APT }} \
+              --paths "/*"
+          fi
+          if [ -n "${{ secrets.CLOUDFRONT_DISTRIBUTION_ID_YUM }}" ]; then
+            aws cloudfront create-invalidation \
+              --distribution-id ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID_YUM }} \
+              --paths "/*"
+          fi
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            debs/*.deb
+            debs/*.deb.asc
+            rpms/*.rpm
+            rpms/*.rpm.asc
+          generate_release_notes: true

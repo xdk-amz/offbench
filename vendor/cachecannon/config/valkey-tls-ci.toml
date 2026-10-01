@@ -1,0 +1,29 @@
+# CI configuration for Valkey/Redis TLS integration tests (self-signed certs)
+
+[general]
+duration = "5s"
+warmup = "2s"
+threads = 2
+
+[target]
+endpoints = ["127.0.0.1:6380"]
+protocol = "resp"
+tls = true
+tls_hostname = "localhost"
+# Verify against the CA the job generates, rather than skipping verification.
+tls_ca_file = "/tmp/valkey-tls/ca.crt"
+
+[connection]
+connections = 4
+pipeline_depth = 8
+
+[workload.keyspace]
+length = 16
+count = 10000
+
+[workload.commands]
+get = 80
+set = 20
+
+[workload.values]
+length = 64

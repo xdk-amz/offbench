@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>valkey-lab</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon.png" />
+  <meta name="description" content="Deep-dive benchmarking tool for Valkey. Mixed workloads, rate control, saturation search, per-second tail latency, and exportable results." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- Nav -->
+<nav class="nav" id="nav">
+  <div class="nav-inner">
+    <a href="#" class="nav-logo"><img src="favicon.png" alt="Valkey" width="20" height="20" style="vertical-align: -3px; margin-right: 6px;" />valkey-lab</a>
+    <div class="nav-links">
+      <button id="theme-toggle" aria-label="Toggle theme">&#9790;</button>
+      <a href="https://github.com/cachecannon/cachecannon" class="nav-github" target="_blank" rel="noopener"><svg height="16" width="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg> GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============ Hero ============ -->
+<section class="hero">
+  <div class="hero-gradient"></div>
+  <div class="hero-content">
+    <h1 class="fade-up"><span class="gradient-text">valkey-lab</span></h1>
+    <div class="install-pill fade-up">
+      <code><span class="cmd">curl</span> <span class="flag">-fsSL</span> <span class="value">https://cachecannon.cc/install.sh</span> | <span class="cmd">bash</span></code>
+      <input type="hidden" id="install-cmd" value="curl -fsSL https://cachecannon.cc/install.sh | bash" />
+      <button class="copy-btn" id="copy-btn" aria-label="Copy to clipboard">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+      </button>
+    </div>
+    <p class="hero-subtitle fade-up">
+      A deep-dive benchmarking tool for Valkey.
+      Go beyond quick throughput checks. Mix workloads, control rate,
+      watch tail latency per second, and find your server's saturation point.
+    </p>
+    <div class="hero-actions fade-up">
+      <a href="#try-it" class="btn btn-primary">Get Started</a>
+      <a href="https://github.com/cachecannon/cachecannon" class="btn btn-secondary" target="_blank" rel="noopener"><svg height="16" width="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg> GitHub</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Try It ============ -->
+<section class="section" id="try-it">
+  <div class="container">
+    <span class="section-tag fade-up">Get Started</span>
+    <h2 class="section-title fade-up">Install, run, analyze</h2>
+
+    <!-- Scenario picker cards -->
+    <div class="bento-grid scenario-grid" style="margin-top: 2rem;">
+      <div class="bento-card scenario-card active fade-up" data-scenario="default">
+        <h3>Quick start</h3>
+        <p>Zero-config defaults, just run it</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-scenario="zipf">
+        <h3>Realistic workload</h3>
+        <p>16 connections, pipeline 32, Zipfian keys</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-scenario="prefill">
+        <h3>Warm cache, GETs only</h3>
+        <p>Prefill every key, then benchmark reads</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-scenario="ratelimit">
+        <h3>Fixed-rate latency</h3>
+        <p>Pin load to 500K req/s, measure latency</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-scenario="saturate">
+        <h3>Saturation search</h3>
+        <p>Find max rate where p999 stays under SLO</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-scenario="export">
+        <h3>Export + view</h3>
+        <p>Save time-series to Parquet, open dashboard</p>
+      </div>
+    </div>
+
+    <!-- Interactive terminal (content swapped by JS) -->
+    <div class="terminal fade-up" id="scenario-terminal" style="margin-top: 1.5rem;">
+      <div class="terminal-bar">
+        <span class="terminal-dot r"></span>
+        <span class="terminal-dot y"></span>
+        <span class="terminal-dot g"></span>
+        <span class="terminal-title" id="scenario-title">~/bench</span>
+      </div>
+      <div class="terminal-body" id="scenario-body"></div>
+    </div>
+
+    <div class="prose fade-up" style="margin-top: 1.25rem;">
+      <p>
+        Short flags are compatible with <code>valkey-benchmark</code> (<code>-c</code>,
+        <code>-P</code>, <code>-d</code>, etc.), but examples here use
+        <code>--named-arguments</code> so you can read them. Full reference in
+        <a href="https://github.com/ksmotiv8/cachecannon/blob/rename-valkey-lab/VALKEY-LAB.md" style="color: var(--accent-light);">VALKEY-LAB.md</a>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ============ Output: Designed to Read ============ -->
+<section class="section" id="output">
+  <div class="container">
+    <span class="section-tag fade-up">Output</span>
+    <h2 class="section-title fade-up">Designed to read, not to parse</h2>
+
+    <div class="prose fade-up" style="margin-top: 1.25rem;">
+      <p>
+        Benchmark output is something you stare at. <code>valkey-lab</code> uses a deliberate
+        color hierarchy so the numbers you care about stand out and the rest stays
+        quiet. <strong>req/s</strong> and <strong>p999</strong> are bold white.
+        Everything else is dimmed. Errors turn red the instant they appear.
+        The header reprints every 25 rows so you never lose context during a long run.
+      </p>
+      <p>
+        This is not cosmetic. When you're watching a 5-minute saturation search or
+        debugging a latency spike in production, the difference between scanning
+        a wall of monochrome numbers and seeing the one column that matters bolded
+        is the difference between catching the problem and scrolling past it.
+      </p>
+    </div>
+
+    <div class="step-timeline fade-up">
+      <div class="step-item" data-step="1">
+        <h3>Bold what matters</h3>
+        <p><strong>req/s</strong> and <strong>p999</strong> are bold white. Time, p50, p90, p99, p9999, max, hit% are all dimmed. Your eye goes straight to throughput and the latency percentile that usually trips SLOs.</p>
+      </div>
+      <div class="step-item" data-step="2">
+        <h3>Color-coded signals</h3>
+        <p>Cyan for config labels. Green for PASS. Red for FAIL and errors. Yellow for throughput warnings. Dim for separators and low-signal columns. Every color has a reason.</p>
+      </div>
+      <div class="step-item" data-step="3">
+        <h3>Per-second streaming</h3>
+        <p>One row per second with full p50 through p9999 and max. Spikes that disappear in aggregate percentiles show up as individual rows in the time series.</p>
+      </div>
+    </div>
+
+    <div class="terminal fade-up" data-animate style="margin-top: 2rem;">
+      <div class="terminal-bar">
+        <span class="terminal-dot r"></span>
+        <span class="terminal-dot y"></span>
+        <span class="terminal-dot g"></span>
+        <span class="terminal-title">valkey-lab --connections 16 --pipeline 32 --ratio 80:20</span>
+      </div>
+      <div class="terminal-body">
+<span class="line med"><span class="t-cyan">time UTC  req/s      p50      p90      p99     p999    p9999      max  err/s  hit%</span></span>
+<span class="line med"><span class="t-dim">────────  ─────  ───────  ───────  ───────  ───────  ───────  ───────  ─────  ────</span></span>
+<span class="line med"><span class="t-dim">14:30:11</span>  <span class="t-bold">524K</span>  <span class="t-dim">  48 µs</span>  <span class="t-dim">  89 µs</span>  <span class="t-dim"> 156 µs</span>  <span class="t-bold"> 312 µs</span>  <span class="t-dim"> 891 µs</span>  <span class="t-dim">1.24 ms</span>  <span class="t-dim">    0</span>  <span class="t-dim"> 79%</span></span>
+<span class="line med"><span class="t-dim">14:30:12</span>  <span class="t-bold">531K</span>  <span class="t-dim">  47 µs</span>  <span class="t-dim">  87 µs</span>  <span class="t-dim"> 152 µs</span>  <span class="t-bold"> 298 µs</span>  <span class="t-dim"> 756 µs</span>  <span class="t-dim">1.12 ms</span>  <span class="t-dim">    0</span>  <span class="t-dim"> 79%</span></span>
+<span class="line med"><span class="t-dim">14:30:13</span>  <span class="t-bold">528K</span>  <span class="t-dim">  47 µs</span>  <span class="t-dim">  88 µs</span>  <span class="t-dim"> 154 µs</span>  <span class="t-bold"> 305 µs</span>  <span class="t-dim"> 812 µs</span>  <span class="t-dim">1.18 ms</span>  <span class="t-dim">    0</span>  <span class="t-dim"> 79%</span></span>
+<span class="line med"></span>
+<span class="line slow"><span class="t-dim">─────────────────────────────────────────────────────────────────────────────────────</span></span>
+<span class="line slow"><span class="t-bold">RESULTS (60s)</span></span>
+<span class="line slow"><span class="t-dim">─────────────────────────────────────────────────────────────────────────────────────</span></span>
+<span class="line slow"><span class="t-cyan">throughput</span>   <span class="t-bold">531K req/s</span>, 0% errors</span>
+<span class="line slow"><span class="t-cyan">bandwidth</span>    <span class="t-dim">684 Mbps RX, 312 Mbps TX</span></span>
+<span class="line slow"></span>
+<span class="line slow"><span class="t-cyan">hit rate</span>     <span class="t-dim">79.3% (25.2M hit, 6.6M miss)</span></span>
+<span class="line slow"></span>
+<span class="line slow"><span class="t-cyan">latency       p50       p90       p99      p999     p9999       max</span></span>
+<span class="line slow"><span class="t-cyan">GET</span>        <span class="t-dim">47 µs</span>     <span class="t-dim">87 µs</span>    <span class="t-dim">154 µs</span>    <span class="t-bold">301 µs</span>    <span class="t-dim">756 µs</span>   <span class="t-dim">1.12 ms</span></span>
+<span class="line slow"><span class="t-cyan">SET</span>        <span class="t-dim">52 µs</span>     <span class="t-dim">94 µs</span>    <span class="t-dim">167 µs</span>    <span class="t-bold">334 µs</span>    <span class="t-dim">891 µs</span>   <span class="t-dim">1.45 ms</span></span>
+<span class="line slow"></span>
+<span class="line slow"><span class="t-cyan">connections</span>  <span class="t-dim">16 active, 0 failed</span></span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ============ Deep Dive Capabilities ============ -->
+<section class="section" id="deep-dive">
+  <div class="container">
+    <span class="section-tag fade-up">Why a lab?</span>
+    <h2 class="section-title fade-up">Go deeper than a quick benchmark</h2>
+
+    <div class="prose fade-up" style="margin-top: 1.25rem;">
+      <p>
+        <code>valkey-benchmark</code> is good for quick throughput checks.
+        <code>valkey-lab</code> builds on that foundation with controls for the questions that
+        come next: what happens under mixed traffic, at a controlled rate,
+        with realistic key distributions, over time?
+      </p>
+    </div>
+
+    <div class="bento-grid scenario-grid" style="margin-top: 2rem;">
+      <div class="bento-card scenario-card active fade-up" data-feature="mixed">
+        <h3>Mixed GET/SET</h3>
+        <p>Concurrent GETs and SETs at any ratio</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-feature="ratelimit">
+        <h3>Rate limiting</h3>
+        <p>Measure latency at a fixed request rate</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-feature="prefill">
+        <h3>Prefill &amp; warmup</h3>
+        <p>Warm cache and discard early samples</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-feature="taillatency">
+        <h3>Per-second tail latency</h3>
+        <p>Catch spikes that hide in aggregates</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-feature="zipf">
+        <h3>Key distribution</h3>
+        <p>Zipfian hot-key patterns</p>
+      </div>
+      <div class="bento-card scenario-card fade-up" data-feature="parquet">
+        <h3>Exportable results</h3>
+        <p>Parquet time-series + web dashboard</p>
+      </div>
+    </div>
+
+    <!-- Interactive terminal for features -->
+    <div class="terminal fade-up" id="feature-terminal" style="margin-top: 1.5rem;">
+      <div class="terminal-bar">
+        <span class="terminal-dot r"></span>
+        <span class="terminal-dot y"></span>
+        <span class="terminal-dot g"></span>
+        <span class="terminal-title" id="feature-title">valkey-lab --connections 16 --pipeline 32 --ratio 80:20</span>
+      </div>
+      <div class="terminal-body" id="feature-body"></div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- ============ Saturation Search ============ -->
+<section class="section" id="saturate">
+  <div class="container">
+    <span class="section-tag fade-up">Saturation Search</span>
+    <h2 class="section-title fade-up">Find max SLO-compliant throughput</h2>
+    <p class="section-subtitle fade-up">
+      Ramps request rate geometrically until your latency SLO breaks.
+      Classifies failures as throughput-limited (server can't keep up)
+      or latency-exceeded (server keeps up but tail latency blows).
+    </p>
+
+    <div class="code-block fade-up" style="margin-top: 1.5rem;">
+      <pre><code><span class="cmd">valkey-lab</span> <span class="flag">saturate</span> <span class="flag">--slo-p999</span> <span class="value">1ms</span> <span class="flag">--connections</span> <span class="value">16</span> <span class="flag">--pipeline</span> <span class="value">32</span></code></pre>
+    </div>
+
+    <div class="terminal fade-up" data-animate style="margin-top: 1.25rem;">
+      <div class="terminal-bar">
+        <span class="terminal-dot r"></span>
+        <span class="terminal-dot y"></span>
+        <span class="terminal-dot g"></span>
+        <span class="terminal-title">valkey-lab saturate --slo-p999 1ms</span>
+      </div>
+      <div class="terminal-body">
+<span class="line slow"></span>
+<span class="line slow"><span class="t-dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span></span>
+<span class="line slow"><span class="t-green">STEP 1 — PASS</span></span>
+<span class="line slow"></span>
+<span class="line slow">SLO:    500K @ p999 ≤ 1ms</span>
+<span class="line slow">Result: <span class="t-bold">498K</span> @ p999=<span class="t-bold">312 µs</span></span>
+<span class="line slow"><span class="t-dim">Headroom: 69%</span></span>
+<span class="line slow"><span class="t-dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span></span>
+<span class="line slow"></span>
+<span class="line slow"><span class="t-dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span></span>
+<span class="line slow"><span class="t-green">STEP 2 — PASS</span></span>
+<span class="line slow"></span>
+<span class="line slow">SLO:    525K @ p999 ≤ 1ms</span>
+<span class="line slow">Result: <span class="t-bold">523K</span> @ p999=<span class="t-bold">445 µs</span></span>
+<span class="line slow"><span class="t-dim">Headroom: 55%</span></span>
+<span class="line slow"><span class="t-dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span></span>
+<span class="line slow"></span>
+<span class="line slow"><span class="t-dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span></span>
+<span class="line slow"><span class="t-red">STEP 3 — FAIL — Throughput Limited</span></span>
+<span class="line slow"></span>
+<span class="line slow">SLO:    551K @ p999 ≤ 1ms</span>
+<span class="line slow">Result: <span class="t-bold">412K</span> @ p999=<span class="t-bold">845 µs</span></span>
+<span class="line slow"><span class="t-yellow">Throughput: 75% (need 90%)</span></span>
+<span class="line slow"><span class="t-dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span></span>
+<span class="line slow"></span>
+<span class="line slow"><span class="t-dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span></span>
+<span class="line slow"><span class="t-red">STEP 4 — FAIL — Latency Exceeded</span></span>
+<span class="line slow"></span>
+<span class="line slow">SLO:    579K @ p999 ≤ 1ms</span>
+<span class="line slow">Result: <span class="t-bold">401K</span> @ p999=<span class="t-bold">3.40 ms</span></span>
+<span class="line slow"><span class="t-red">Latency: p999 3400us > 1000us SLO</span></span>
+<span class="line slow"><span class="t-dim">━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</span></span>
+<span class="line slow"></span>
+<span class="line slow"><span class="t-dim">────────────────────────────────────────────────────────</span></span>
+<span class="line slow"><span class="t-green">MAX COMPLIANT THROUGHPUT: 525K req/s</span></span>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <p><code>valkey-lab</code> is part of <a href="https://github.com/cachecannon/cachecannon">cachecannon</a> &middot; MIT / Apache-2.0</p>
+  </div>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>

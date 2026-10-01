@@ -1,0 +1,428 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  redis:
+    name: Redis
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Run benchmark against Redis
+        run: ./target/release/cachecannon config/redis-ci.toml
+
+  valkey:
+    name: Valkey
+    runs-on: ubuntu-latest
+    services:
+      valkey:
+        image: valkey/valkey:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Run benchmark against Valkey
+        run: ./target/release/cachecannon config/valkey-ci.toml
+
+  valkey-append:
+    name: Valkey (append stream)
+    runs-on: ubuntu-latest
+    services:
+      valkey:
+        image: valkey/valkey:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Run append-stream benchmark against Valkey
+        run: ./target/release/cachecannon config/valkey-append-ci.toml | tee out.json
+      - name: Check that append batches committed and were reported
+        run: |
+          python3 - <<'EOF'
+          import json
+          # JSON output is one object per line; the final one is the result.
+          results = [json.loads(l) for l in open("out.json") if l.startswith('{"type":"result"')]
+          assert results, "no result line in output"
+          r = results[-1]
+          a = r.get("append_set")
+          assert a and a["count"] > 0, f"no append SETs reported: {r}"
+          assert r.get("append_batches", 0) >= 2, f"expected >= 2 committed batches: {r}"
+          assert r["misses"] == 0, f"reads targeted unwritten keys: {r['misses']} misses"
+          EOF
+
+  valkey-resp3:
+    name: Valkey (RESP3)
+    runs-on: ubuntu-latest
+    services:
+      valkey:
+        image: valkey/valkey:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Run RESP3 benchmark against Valkey
+        run: ./target/release/cachecannon config/valkey-resp3-ci.toml
+
+  valkey-ratelimit:
+    name: Valkey (rate limited)
+    runs-on: ubuntu-latest
+    services:
+      valkey:
+        image: valkey/valkey:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Run rate-limited benchmark against Valkey
+        run: ./target/release/cachecannon config/valkey-ratelimit-ci.toml
+
+  valkey-saturation:
+    name: Valkey (saturation search)
+    runs-on: ubuntu-latest
+    services:
+      valkey:
+        image: valkey/valkey:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Run saturation search benchmark against Valkey
+        run: ./target/release/cachecannon config/valkey-saturation-ci.toml
+
+  valkey-tls:
+    name: Valkey TLS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Valkey and generate TLS certificates
+        run: |
+          # The runner image ships a Google Chrome apt source we do not use.
+          # While Google republishes, its Packages index and Release file
+          # disagree, and `apt-get update` exits non-zero on ANY failed index --
+          # failing the job even though it already ignored the bad one and every
+          # package we install comes from the Ubuntu archive. Drop the source we
+          # do not need rather than ignore all failures, which would hide a real
+          # archive outage as a confusing "package not found" later.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y valkey-server || {
+            # Fallback: install from Valkey PPA if not in default repos
+            curl -fsSL https://packages.valkey.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/valkey.gpg
+            echo "deb [signed-by=/usr/share/keyrings/valkey.gpg] https://packages.valkey.io/deb stable main" | sudo tee /etc/apt/sources.list.d/valkey.list
+            sudo apt-get update && sudo apt-get install -y valkey-server
+          }
+
+          # A CA signing a separate server certificate, rather than one
+          # self-signed certificate used as both. `openssl req -x509` defaults
+          # to basicConstraints CA:TRUE and -addext only *adds* to those
+          # defaults, so a certificate made that way is a CA — and presenting a
+          # CA as the server's leaf is rejected with CaUsedAsEndEntity once the
+          # client actually verifies rather than skipping verification.
+          mkdir -p /tmp/valkey-tls
+          cd /tmp/valkey-tls
+
+          openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes \
+            -keyout ca.key -out ca.crt \
+            -subj "/CN=cachecannon-test-ca" \
+            -addext "basicConstraints=critical,CA:TRUE"
+
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout valkey.key -out valkey.csr \
+            -subj "/CN=localhost"
+
+          printf 'subjectAltName = DNS:localhost,IP:127.0.0.1\nbasicConstraints = critical,CA:FALSE\n' > server.ext
+
+          openssl x509 -req -in valkey.csr -CA ca.crt -CAkey ca.key \
+            -CAcreateserial -out valkey.crt -days 1 -sha256 \
+            -extfile server.ext
+
+          echo "--- server certificate ---"
+          openssl x509 -in valkey.crt -noout -subject -issuer -ext subjectAltName,basicConstraints
+
+      - name: Start Valkey with TLS
+        run: |
+          valkey-server \
+            --tls-port 6380 \
+            --port 0 \
+            --tls-cert-file /tmp/valkey-tls/valkey.crt \
+            --tls-key-file /tmp/valkey-tls/valkey.key \
+            --tls-ca-cert-file /tmp/valkey-tls/ca.crt \
+            --tls-auth-clients no \
+            --daemonize yes
+
+          # Wait for Valkey to be ready (fail if it never responds)
+          for i in $(seq 1 30); do
+            if valkey-cli --tls \
+              --cert /tmp/valkey-tls/valkey.crt --key /tmp/valkey-tls/valkey.key \
+              --cacert /tmp/valkey-tls/ca.crt \
+              -p 6380 ping 2>/dev/null | grep -q PONG; then
+              echo "Valkey TLS is ready"
+              exit 0
+            fi
+            echo "Waiting for Valkey TLS... ($i)"
+            sleep 1
+          done
+          echo "ERROR: Valkey TLS never became ready"
+          exit 1
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run benchmark against Valkey TLS
+        run: ./target/release/cachecannon config/valkey-tls-ci.toml
+
+  request-timeout:
+    name: Request timeout (black-hole server)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Start a RESP server that answers PING and nothing else
+        run: |
+          python3 scripts/blackhole-resp.py 6390 &
+          sleep 1
+      - name: Run against the black hole
+        run: ./target/release/cachecannon config/timeout-ci.toml | tee out.json
+      - name: Every request must have timed out, none answered
+        run: |
+          python3 - <<'EOF'
+          import json
+          results = [json.loads(l) for l in open("out.json") if l.startswith('{"type":"result"')]
+          assert results, "no result line in output"
+          r = results[-1]
+          assert r["timeouts"] > 0, f"request_timeout not enforced: {r}"
+          assert r["responses"] == 0, f"black hole answered something: {r}"
+          assert r["errors"] >= r["timeouts"], f"timeouts not counted as errors: {r}"
+          # 4 conns x 8 pipeline, abandoned every 500ms over a 4s window: expect
+          # well over one round of timeouts, and a bounded number of them.
+          assert 32 <= r["timeouts"] <= 4 * 8 * 12, f"unexpected timeout count: {r}"
+          EOF
+
+  memcache:
+    name: Memcache
+    runs-on: ubuntu-latest
+    services:
+      memcached:
+        image: memcached:latest
+        ports:
+          - 11211:11211
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # memcached ships no CLI to health-check with, so probe the mapped port
+      # from the runner instead of using a container health-cmd.
+      - name: Wait for Memcached
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/11211) 2>/dev/null; then
+              echo "Memcached is ready"
+              exit 0
+            fi
+            echo "Waiting for Memcached... ($i)"
+            sleep 1
+          done
+          echo "ERROR: Memcached never became ready"
+          exit 1
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run benchmark against Memcache
+        run: ./target/release/cachecannon config/memcache-ci.toml
+
+  memcache-binary:
+    name: Memcache (binary)
+    runs-on: ubuntu-latest
+    services:
+      memcached:
+        image: memcached:latest
+        ports:
+          - 11211:11211
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Wait for Memcached
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/11211) 2>/dev/null; then
+              echo "Memcached is ready"
+              exit 0
+            fi
+            echo "Waiting for Memcached... ($i)"
+            sleep 1
+          done
+          echo "ERROR: Memcached never became ready"
+          exit 1
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run benchmark against Memcache (binary protocol)
+        run: ./target/release/cachecannon config/memcache-binary-ci.toml
+
+  memcache-tls:
+    name: Memcache TLS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Ubuntu's memcached package is built without TLS, so build from source.
+      - name: Build memcached with TLS support
+        run: |
+          # Drop the unused Chrome apt source; see the note in `valkey-tls`.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
+                     /etc/apt/sources.list.d/google-chrome.sources
+          sudo apt-get update
+          sudo apt-get install -y libevent-dev libssl-dev pkg-config
+          curl -fsSL https://memcached.org/latest -o /tmp/memcached.tar.gz
+          mkdir -p /tmp/memcached-src
+          tar xzf /tmp/memcached.tar.gz -C /tmp/memcached-src --strip-components=1
+          cd /tmp/memcached-src
+          ./configure --enable-tls
+          make -j"$(nproc)"
+          ./memcached --version
+
+      # A CA certificate signing a separate server certificate, rather than one
+      # self-signed certificate used as both. `openssl req -x509` defaults to
+      # basicConstraints CA:TRUE and -addext only *adds* to those defaults, so
+      # a self-signed cert made that way is a CA — and presenting a CA as the
+      # server's leaf is rejected with CaUsedAsEndEntity.
+      - name: Generate TLS certificates
+        run: |
+          mkdir -p /tmp/memcache-tls
+          cd /tmp/memcache-tls
+
+          openssl req -x509 -newkey rsa:2048 -sha256 -days 1 -nodes \
+            -keyout ca.key -out ca.crt \
+            -subj "/CN=cachecannon-test-ca" \
+            -addext "basicConstraints=critical,CA:TRUE"
+
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout memcached.key -out memcached.csr \
+            -subj "/CN=localhost"
+
+          printf 'subjectAltName = DNS:localhost,IP:127.0.0.1\nbasicConstraints = critical,CA:FALSE\n' > server.ext
+
+          openssl x509 -req -in memcached.csr -CA ca.crt -CAkey ca.key \
+            -CAcreateserial -out memcached.crt -days 1 -sha256 \
+            -extfile server.ext
+
+          echo "--- server certificate ---"
+          openssl x509 -in memcached.crt -noout -subject -issuer -ext subjectAltName,basicConstraints
+
+      # Not daemonized: -d discards memcached's own diagnostics, which is
+      # exactly what is needed when TLS setup fails.
+      - name: Start memcached with TLS
+        run: |
+          /tmp/memcached-src/memcached -Z -p 11212 -v \
+            -o ssl_chain_cert=/tmp/memcache-tls/memcached.crt,ssl_key=/tmp/memcache-tls/memcached.key \
+            > /tmp/memcached.log 2>&1 &
+
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/11212) 2>/dev/null; then
+              echo "Memcached TLS is ready"
+              echo "--- memcached log ---"
+              cat /tmp/memcached.log || true
+              exit 0
+            fi
+            echo "Waiting for Memcached TLS... ($i)"
+            sleep 1
+          done
+          echo "ERROR: Memcached TLS never became ready"
+          echo "--- memcached log ---"
+          cat /tmp/memcached.log || true
+          exit 1
+
+      # Confirms the port actually speaks TLS and that the generated CA
+      # verifies it, independently of cachecannon.
+      - name: Verify TLS endpoint with openssl
+        run: |
+          echo | openssl s_client -connect 127.0.0.1:11212 \
+            -servername localhost -CAfile /tmp/memcache-tls/ca.crt 2>&1 \
+            | grep -E "Protocol|Cipher|Verify return code|verify error|CONNECTED|errno" \
+            | head -10
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run benchmark against Memcache TLS
+        run: ./target/release/cachecannon config/memcache-tls-ci.toml
