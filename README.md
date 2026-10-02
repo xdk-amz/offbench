@@ -118,3 +118,8 @@ A rep is stored always, but counts toward a mean only when `main_active >= 98%`,
 timeouts. `compare` prints no delta for a cell with fewer than two valid reps on a
 side; the dashboard hatches it. This encodes the saturation rule so nobody has to
 remember it.
+
+## Scenarios
+
+- [Replica read capacity](docs/replica-read-capacity.md): at X writes/s and Y reads/s on the primary, how
+  many reads/s the replica serves before it falls out of sync (`repl-run`).
