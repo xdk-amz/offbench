@@ -157,12 +157,14 @@ def calibrate(measure: Measure, builds: list[str], x: float, y: float, start: di
               max_probes: int = 12, confirm_reps: int = 3, log: Callable[[str], None] = print,
               seed: Optional[dict] = None) -> dict:
     """Per build, the shape whose primary delivers X and Y within tol, probed one rep at a time and then
-    confirmed with confirm_reps interleaved reps. seed: earlier points per build (e.g. the reference reps).
+    confirmed with confirm_reps interleaved reps. seed: the reference median per build, as (shape, writes,
+    reads) points.
 
     One-rep probes are noisy (~1%), so the search aims inside AIM x tol and only the confirmation's median
     has to land within tol."""
     aim = AIM * tol
     points = {b: list((seed or {}).get(b, [])) for b in builds}
+    kinds = {b: ["reference"] * len(points[b]) for b in builds}
     probes = {b: 0 for b in builds}
     shape = {b: start[b] for b in builds}
     chosen: dict = {}
@@ -187,6 +189,7 @@ def calibrate(measure: Measure, builds: list[str], x: float, y: float, start: di
                 v = [r for r in recs.get(b, []) if r.get("valid")]
                 for r in v:
                     points[b].append((s, *delivered(r)))
+                    kinds[b].append("probe")
                 if v:
                     log(f"{b}: {s.label()} -> {v[0]['primary']['write_kcmd_s']:.0f}k writes, "
                         f"{v[0]['primary']['read_kcmd_s']:.0f}k reads")
@@ -220,6 +223,7 @@ def calibrate(measure: Measure, builds: list[str], x: float, y: float, start: di
             v = [r for r in recs.get(b, []) if r.get("valid")]
             for r in v:
                 points[b].append((chosen[b], *delivered(r)))
+                kinds[b].append("confirm")
             ok = len(v) * 2 > confirm_reps
             w = statistics.median(delivered(r)[0] for r in v) if v else float("nan")
             r_ = statistics.median(delivered(r)[1] for r in v) if v else float("nan")
@@ -236,14 +240,15 @@ def calibrate(measure: Measure, builds: list[str], x: float, y: float, start: di
         todo = retry
     return {"targets": {"write_kcmd_s": x, "read_kcmd_s": y}, "tol": tol, "builds": result,
             "converged": all(v["converged"] for v in result.values()),
-            "points": {b: [[*asdict(s).values(), w, r] for s, w, r in points[b]] for b in builds}}
+            "points": {b: [{"kind": k, **asdict(s), "write_kcmd_s": w, "read_kcmd_s": r}
+                           for k, (s, w, r) in zip(kinds[b], points[b])] for b in builds}}
 
 
 # ------------------------------------------------------------- report ----
 
 def fmt_rate(k: float) -> str:
-    """k/s as 782k or 6.82M."""
-    return f"{k / 1000:.2f}M" if k >= 1000 else f"{k:.0f}k"
+    """k/s as 782k or 6.82M; a value that rounds to 1000k prints as 1.00M."""
+    return f"{k / 1000:.2f}M" if k >= 999.5 else f"{k:.0f}k"
 
 
 def _med(xs) -> float:
@@ -254,10 +259,6 @@ def _med(xs) -> float:
 def cores(rec: dict) -> int:
     c = rec["cell"]
     return c["io_threads"] - (c.get("pin_share") or 0)
-
-
-def lagging_only(rec: dict) -> bool:
-    return bool(rec.get("invalid")) and all(w.startswith(repl.LAGGING) for w in rec["invalid"])
 
 
 def reader_threads(rec: dict) -> int:
@@ -290,6 +291,7 @@ def gen_flag(valid: list) -> bool:
 
 @dataclass
 class Step:
+    """One replica read load (reader connections) in a build's sweep, over its reps."""
     readers: int
     recs: list
 
@@ -299,11 +301,13 @@ class Step:
 
     @property
     def behind(self) -> int:
-        return sum(lagging_only(r) for r in self.recs)
+        """Reps in which the replica fell behind; one is enough to put the step out of sync."""
+        return sum(repl.fell_behind(r) for r in self.recs)
 
     @property
     def ok(self) -> bool:
-        return len(self.valid) * 2 > len(self.recs)
+        """In sync in every rep, and valid in a majority of them (harness errors count as reps)."""
+        return not self.behind and len(self.valid) * 2 > len(self.recs)
 
     @property
     def read(self) -> float:
@@ -311,50 +315,53 @@ class Step:
 
     def note(self) -> str:
         n = len(self.recs)
+        bad = [r for r in self.recs if not r.get("valid")]
+        if self.behind:
+            return f"invalid, fell behind {self.behind}/{n}"
+        first = (bad[0].get("error") or bad[0]["invalid"][0]) if bad else ""
         if not self.ok:
-            if self.behind:
-                return f"invalid, fell behind {self.behind}/{n}"
-            other = next((r.get("error") or r["invalid"][0] for r in self.recs if not r.get("valid")), "")
-            return f"invalid: {other}"
+            return f"invalid: {first}"
         tags = []
         if self.readers and rtt_flag(self.valid):
             tags.append("RTT")
         if self.readers and gen_flag(self.valid):
             tags.append("GEN")
-        if self.behind:
-            tags.append(f"{self.behind} rep{'s' if self.behind > 1 else ''} fell behind")
-        others = n - len(self.valid) - self.behind
-        if others:
-            tags.append(f"{others} other invalid")
+        if bad:
+            tags.append(f"{len(bad)}/{n} invalid: {first}")
         return ", ".join(tags)
 
 
 def outcome(steps: list) -> tuple[str, str]:
-    """(replica reads/s in sync, what more offered reads did) for one build's sweep."""
+    """(replica reads/s in sync, what more offered reads did) for one build's sweep.
+
+    The rate is the highest over in-sync steps below the first step where the replica fell behind: an in-sync
+    step above that one is reported, but it does not raise the rate."""
     load = [s for s in steps if s.readers]
     ins = [s for s in load if s.ok]
-    oos = [s for s in load if not s.ok and s.behind]
-    if not ins:
-        first = min(oos, key=lambda s: s.readers) if oos else None
-        return "none", (f"out of sync from {first.readers} readers" if first else "no valid step")
-    top = max(ins, key=lambda s: s.read)
-    i = ins.index(top)
-    rising = top is ins[-1] and (i == 0 or top.read > (1 + RISING) * ins[i - 1].read)
-    rate = ("at least " if rising else "") + fmt_rate(top.read)
-    at = f"{rate} at {top.readers} readers"
+    oos = [s for s in load if s.behind]
+    first = min(oos, key=lambda s: s.readers) if oos else None
+    below = [s for s in ins if first is None or s.readers < first.readers]
+    again = [s.readers for s in ins if first is not None and s.readers > first.readers]
+    unstable = ("unstable: out of sync at " + ", ".join(f"{s.readers} ({s.behind}/{len(s.recs)} fell behind)"
+                                                         for s in oos)
+                + f", in sync at {', '.join(map(str, again))}") if again else ""
+    if not below:
+        if first is None:
+            return "none", "no valid step"
+        return "none", unstable or f"out of sync from {first.readers} readers"
+    top = max(below, key=lambda s: s.read)
+    i = below.index(top)
+    rising = top is below[-1] and (i == 0 or top.read > (1 + RISING) * below[i - 1].read)
+    at = ("at least " if rising else "") + f"{fmt_rate(top.read)} at {top.readers} readers"
     if gen_flag(top.valid):
         return f"at least {fmt_rate(top.read)} at {top.readers} readers", \
             "not reached: the replica readers' generator ran out of cores"
-    if not oos:
+    if first is None:
         return at, ("in sync at every step; reads still rising, extend the sweep" if rising
                     else "in sync at every step; reads level off")
-    first = min(oos, key=lambda s: s.readers)
-    again = [s.readers for s in ins if s.readers > first.readers]
     if again:
-        where = ", ".join(f"{s.readers} ({s.behind}/{len(s.recs)} fell behind)" for s in oos)
-        return at, f"unstable: out of sync at {where}, in sync at {', '.join(map(str, again))}"
-    last = max(s.readers for s in ins)
-    return at, f"falls out of sync between {last} and {first.readers} readers" + (
+        return at, unstable
+    return at, f"falls out of sync between {below[-1].readers} and {first.readers} readers" + (
         "" if rising else "; reads had levelled off")
 
 

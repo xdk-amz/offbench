@@ -59,7 +59,7 @@ deploy-time patch; the worker's Builder compiles `vendor/cachecannon` on the
 host on first task and caches the binary.
 
 ```
-OFFBENCH_KEY=../rig/<key>.pem OFFBENCH_KNOWN_HOSTS=../rig/known_hosts \
+OFFBENCH_KEY=../rig/valkey-bench-09092304.pem OFFBENCH_KNOWN_HOSTS=../rig/known_hosts \
     python3 -m offbench deploy --hosts metal-2,metal-3
 ```
 
@@ -102,7 +102,7 @@ name uses `bins.json` or the legacy `~/<name>/src/valkey-server` on the host):
 python3 -m offbench queue add --bins base:stock cc=a8f50bd2c@main-thread-offload-client-control \
     --workloads get,set,mixed --pipelines 1,16 --conns 2400,7000 --reps 3 --perf \
     --note "ClientControl A/B" --emit /tmp/t.json
-OFFBENCH_KEY=../rig/<key>.pem OFFBENCH_KNOWN_HOSTS=../rig/known_hosts python3 -m offbench push /tmp/t.json
+OFFBENCH_KEY=../rig/valkey-bench-09092304.pem OFFBENCH_KNOWN_HOSTS=../rig/known_hosts python3 -m offbench push /tmp/t.json
 ...
 python3 -m offbench sync --all && python3 -m offbench export   # pull results + status, refresh dashboard
 ```

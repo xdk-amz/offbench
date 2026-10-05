@@ -28,22 +28,23 @@ Under the ssh user's home on each host:
 - every host: `~/offbench-src` with the same offbench code as the checkout you run from, since the host side
   of each rep is this package's `repl-agent`.
 
-`repl-calibrate` and `repl-run` check all of this before the first rep and list what is missing. To sync the
-code: `python3 -m offbench deploy --source-only --hosts metal-2,metal-7,metal-8,metal-4` (rsync only; it starts
-nothing). These commands do not build valkey or cachecannon.
+`repl-calibrate` and `repl-run` check all of this before the first rep and list what is missing. Step 1 of the
+procedure syncs the code; nothing here builds valkey or cachecannon.
 
 ## Procedure
 
-Run from the offbench checkout. The ssh key and known-hosts file for the rig are in `../rig/`:
+Run from the offbench checkout. Set the rig's ssh key and known-hosts file, the hosts and the builds:
 
 ```
-export OFFBENCH_KEY=../rig/<key>.pem OFFBENCH_KNOWN_HOSTS=../rig/known_hosts
+export OFFBENCH_KEY=../rig/valkey-bench-09092304.pem OFFBENCH_KNOWN_HOSTS=../rig/known_hosts
 H="--primary metal-2 --replica metal-7 --gen metal-8 --reader-gen metal-4"
 B="stock=<sha>,rr=<sha>,custom=<sha>|keyspace-shard-bits 10"
 ```
 
 Lease the four hosts for the whole procedure, so nobody takes them between commands, and release them at
-the end. Each command also leases its hosts and leaves the ones you already hold alone.
+the end. Each command also leases its hosts and leaves the ones you already hold alone. A command started
+from another shell or as a detached job (tmux, nohup) counts as yours only with `HOSTS_LEASE` set to the
+token acquire prints; without it, it can be refused as someone else's.
 
 ```
 python3 ~/.kiro/crew/skills/hosts/hosts.py acquire metal-2,metal-7,metal-8,metal-4 --label "replica read capacity"
@@ -51,7 +52,13 @@ python3 ~/.kiro/crew/skills/hosts/hosts.py acquire metal-2,metal-7,metal-8,metal
 python3 ~/.kiro/crew/skills/hosts/hosts.py release metal-2,metal-7,metal-8,metal-4
 ```
 
-1. Calibrate X, Y and each build's primary load (about 20-30 min):
+1. Sync this checkout's code to the hosts (about a minute; rsync only, it starts nothing):
+
+   ```
+   python3 -m offbench deploy --source-only --hosts metal-2,metal-7,metal-8,metal-4
+   ```
+
+2. Calibrate X, Y and each build's primary load (about 12 min at 4 cores). `<C>` is the cores per server:
 
    ```
    python3 -m offbench repl-calibrate $H --bins "$B" --share-bins custom --iot <C> --out data/repl/<name>-calib.jsonl
@@ -63,14 +70,17 @@ python3 ~/.kiro/crew/skills/hosts/hosts.py release metal-2,metal-7,metal-8,metal
    - Search: per build, one-rep probes with no replica readers. Requests in flight are adjusted until the
      primary delivers X and Y within 3%: the total against X + Y, the writer/reader split against X/Y. A
      generator below 10 connections has its pipeline depth halved until it has 10 (or reaches P1), for finer
-     steps. At most 12 probes per build.
+     steps, and keeps that depth for the rest of the search. At most 12 probes per build.
    - Confirm: 3 interleaved reps per build at its chosen load. The median must be within 5% of X and Y, or
      the build is searched again (3 rounds at most).
-   - Output: the records in `<name>-calib.jsonl`, and the calibration in `<name>-calib.json` (targets,
-     hosts, builds, each build's writers and primary readers with their pipelines, every probe). It exits 1
-     if a build did not converge, and `repl-run` refuses that calibration.
+   - Output: the records in `<name>-calib.jsonl`, a `.log` beside them, and the calibration in
+     `<name>-calib.json`: targets, hosts, builds, each build's `shape` (`w` writer and `p` primary reader
+     connections, `wp` and `pp` their pipelines), and under `points` every measurement per build, labelled
+     reference, probe or confirm. It exits 1 if a build did not converge, and `repl-run` refuses that
+     calibration.
 
-2. Raise the replica's offered read load step by step (about 30 min at 4 cores; add 1600 from 8 cores up):
+3. Raise the replica's offered read load step by step (about 25 min at 4 cores, 54 reps; add 1600 from 8
+   cores up):
 
    ```
    python3 -m offbench repl-run --calibration data/repl/<name>-calib.json \
@@ -81,7 +91,7 @@ python3 ~/.kiro/crew/skills/hosts/hosts.py release metal-2,metal-7,metal-8,metal
    `--share-bins`, `--bin-write-conns` and `--bin-p-conns` are refused alongside it. Every rep is judged
    against its targets.
 
-3. Report:
+4. Report:
 
    ```
    python3 -m offbench repl-capacity data/repl/<name>.jsonl
@@ -101,8 +111,9 @@ larger of 0.5 MB/s and 1% of the replication stream over the window. A rep is in
 - a host exceeded its ENA allowance;
 - the primary delivered X or Y more than 7% off target.
 
-`repl-capacity` judges each step: it needs valid reps in a majority of its reps (harness errors count as
-reps). An invalid step is reported as invalid, with no number.
+`repl-capacity` judges each step. It is out of sync if the replica fell behind in any of its reps, since the
+replica cannot be relied on at that load, and invalid if fewer than a majority of its reps are valid (harness
+errors count as reps). Either way it is reported as invalid, with no number.
 
 Flags on valid steps with replica readers:
 
@@ -116,7 +127,8 @@ Flags on valid steps with replica readers:
 ## Result
 
 `repl-capacity` prints, per core count and build: X and Y as delivered (medians over the sweep's valid reps),
-the highest replica read rate over in-sync steps, and what more offered reads did:
+the highest replica read rate over in-sync steps below the first step where the replica fell behind, and what
+more offered reads did:
 
 - in sync at every step, reads level off: the rate is the replica's capacity at (X, Y). Levelling off means
   the top step is within 5% of the in-sync step below it, or a later step read less.
@@ -124,20 +136,23 @@ the highest replica read rate over in-sync steps, and what more offered reads di
 - falls out of sync between N and M readers: M fell behind and no step above it was in sync. "At least" if
   the reads were still rising at N.
 - unstable: an out-of-sync step sits below an in-sync one. The out-of-sync steps are listed with how many
-  reps fell behind.
+  reps fell behind, then the in-sync steps above the first of them, which do not raise the rate.
 - not reached: the replica readers' generator ran out of cores (GEN) at the top step. "At least".
 
 Under it, the per-step raw table: build (writers/primary readers, with pipelines when not P16), replica reader
-connections, valid reps, writes/s, primary reads/s, replica reads/s, reader p99, and a note (flags, reps that
-fell behind, the first other invalid reason).
+connections, valid reps, writes/s, primary reads/s, replica reads/s, reader p99, and a note (flags, how many
+reps fell behind, or how many reps were invalid and the first reason).
 
-Example, 4 cores (2026-10-02, `data/repl/capacity-test-4c.jsonl`, run before these commands existed):
+Example, 4 cores (2026-10-05, `data/repl/capacity-test2-4c.jsonl`):
 
 | build | X writes/s | Y reads/s | replica reads/s in sync | more offered reads |
 |---|---:|---:|---|---|
-| stock | 798k | 1.03M | at least 2.26M at 50 readers | falls out of sync between 50 and 100 readers |
-| rr | 775k | 1.00M | 6.63M at 100 readers | unstable: out of sync at 200 (2/3 fell behind), in sync at 400, 800 |
-| custom | 803k | 994k | 6.82M at 800 readers | in sync at every step; reads level off |
+| stock | 771k | 995k | at least 2.31M at 50 readers | falls out of sync between 50 and 100 readers |
+| rr | 778k | 1.02M | 6.65M at 100 readers | unstable: out of sync at 200 (1/3 fell behind), 800 (2/3 fell behind), in sync at 400 |
+| custom | 802k | 1.00M | 6.85M at 800 readers | in sync at every step; reads level off |
+
+A run on 2026-10-02 (`capacity-test-4c.jsonl`) gave the same outcomes with rates within 2%; there rr fell
+behind at 200 and 400 readers.
 
 ## repl-run reference
 

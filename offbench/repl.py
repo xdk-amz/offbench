@@ -62,6 +62,12 @@ LAGGING = "replica fell behind"
 # A rep whose primary delivered its target writes or reads more than this far off is invalid.
 DRIFT_TOL = 0.07
 
+
+def fell_behind(rec: dict) -> bool:
+    """The replica fell behind in this rep, whatever else made it invalid. One such rep puts its whole
+    step out of sync: the replica cannot be relied on at that read load."""
+    return any(w.startswith(LAGGING) for w in rec.get("invalid") or [])
+
 HOME = Path.home()
 CLI = HOME / "base" / "src" / "valkey-cli"
 CACHECANNON = HOME / "offbench-src" / "vendor" / "cachecannon" / "target" / "release" / "cachecannon"
@@ -864,7 +870,9 @@ def sweep_summary(recs: list[dict]) -> str:
     """Read-client sweep: per point medians, then each build's sustainable read ceiling.
 
     Points are grouped by cores per server, the primary's load (writers, primary readers) and build, so a
-    calibration probe never merges into a sweep step. A point needs valid reps in a majority of all its reps."""
+    calibration probe never merges into a sweep step. A point is invalid when the replica fell behind in any
+    rep, or when fewer than a majority of its reps are valid. The ceiling comes from points below the first
+    one where the replica fell behind."""
     groups: dict = {}
     for r in recs:
         if "error" in r or r.get("schema", 1) < 2:
@@ -876,15 +884,19 @@ def sweep_summary(recs: list[dict]) -> str:
     med = lambda xs: statistics.median(xs) if xs else float("nan")
     rows = ["cores  P  build     wconn pconn rconns  valid  write k/s  apply k/s  read k/s  r.main%  lag+MB/s  r.p99us"]
     ceil: dict = {}
+    broken: set = set()
     for k in sorted(groups):
         rs = groups[k]
         v = [x for x in rs if x["valid"]]
-        behind = [x for x in rs if x.get("invalid") and all(w.startswith(LAGGING) for w in x["invalid"])]
+        behind = [x for x in rs if fell_behind(x)]
         head = f"{k[0]:>5} {k[1]:>2}  {k[2]:<8} {k[3]:>5} {k[4]:>5} {k[5]:>6}  {len(v)}/{len(rs)}"
-        if len(v) * 2 <= len(rs):
+        ck = k[:5]
+        if behind or len(v) * 2 <= len(rs):
             why = (f"{LAGGING} in {len(behind)}/{len(rs)} reps" if behind
                    else next((x["invalid"][0] for x in rs if x.get("invalid")), "no valid reps"))
             rows.append(f"{head}  INVALID: {why}")
+            if behind and k[5]:
+                broken.add(ck)
             continue
         read = med([x["replica"]["read_kcmd_s"] for x in v])
         rows.append(
@@ -892,10 +904,10 @@ def sweep_summary(recs: list[dict]) -> str:
             f"{read:8.0f}  {med([x['replica']['main_cpu_pct'] for x in v]):7.1f}  "
             f"{med([x['lag_growth_mb_s'] for x in v]):8.1f}  "
             f"{med([((x['reader'] or {}).get('latency') or {}).get('p99_us') or 0 for x in v]):7.0f}")
-        ck = k[:5]
-        if k[5] and (ck not in ceil or read > ceil[ck][0]):
+        if k[5] and ck not in broken and (ck not in ceil or read > ceil[ck][0]):
             ceil[ck] = (read, k[5])
-    rows += ["", "sustainable read ceiling (highest median read rate over points in sync)",
+    rows += ["", "sustainable read ceiling (highest median read rate over points in sync, below the first point "
+                 "where the replica fell behind)",
              "cores  P  build     wconn pconn  read k/s  at rconns"]
     for ck in sorted({k[:5] for k in groups}):
         c = ceil.get(ck)

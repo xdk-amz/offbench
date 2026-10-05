@@ -1294,6 +1294,11 @@ def test_replcap_calibration_matches_each_simulated_build_to_x_and_y():
     assert s.wp < 16 and s.w >= replcap.MIN_CONNS
     assert [c[0] for c in calls].count("confirm") == 1 and calls[0][0] == "reference"
     assert all(c[2] == 1 for c in calls if c[0] == "probe")
+    for b in builds:
+        pts = res["points"][b]
+        assert pts[0]["kind"] == "reference" and set(pts[0]) == {"kind", "w", "wp", "p", "pp", "write_kcmd_s",
+                                                                  "read_kcmd_s"}
+        assert [p["kind"] for p in pts[-3:]] == ["confirm"] * 3 and {p["kind"] for p in pts[1:-3]} <= {"probe"}
 
 
 def test_replcap_next_x_brackets_and_bisects_on_a_plateau():
@@ -1308,7 +1313,9 @@ def test_replcap_next_x_brackets_and_bisects_on_a_plateau():
 def _cap(build, readers, read, state="ok", cores=None, threads=79, rtt=0.05, w=800.0, r=1000.0, shape=(7, 9)):
     from offbench import repl
     inv = {"ok": [], "behind": [f"{repl.LAGGING}: applied 80% of primary writes, lag +9.0 MB/s"],
-           "bad": ["primary asserted"]}[state]
+           "bad": ["primary asserted"],
+           "behind_drift": ["primary writes 900k/s, +15.1% off target 782k/s",
+                            f"{repl.LAGGING}: applied 90% of primary writes, lag +3.0 MB/s"]}[state]
     return {"kind": "replrw", "schema": 1, "bin": {"name": build}, "rep": 1, "hosts": {"rgen": "x"},
             "cell": {"conns": readers, "pipeline": 16, "io_threads": 4, "pin_share": 0, "write_conns": shape[0],
                      "p_conns": shape[1], "write_pipeline": 16, "p_pipeline": 16},
@@ -1330,6 +1337,10 @@ def test_replcap_report_outcomes_and_flags():
     recs += [_cap("wide", 400, 5000)] * 3 + [_cap("wide", 800, 6000)] * 3
     recs += [_cap("gen", 400, 15000, cores=30)] * 3 + [_cap("gen", 800, 22000, cores=76)] * 3
     recs += [_cap("custom", 0, 0, shape=(24, 25))] * 3   # a reference probe in the same file
+    # one lagging rep (also off target) puts 200 out of sync, and the in-sync 400 above it does not set the rate
+    recs += [_cap("late", 50, 4900)] * 3 + [_cap("late", 100, 5000)] * 3
+    recs += [_cap("late", 200, 5500)] * 2 + [_cap("late", 200, 5600, "behind_drift")] + [_cap("late", 400, 7000)] * 3
+    recs += [_cap("flaky", 100, 5000)] * 2 + [_cap("flaky", 100, 5000, "bad")] + [_cap("flaky", 200, 5100)] * 3
     out = replcap.report(recs, targets=(782.0, 988.0))
     lines = out.splitlines()
     top = lines.index("| build | X writes/s | Y reads/s | replica reads/s in sync | more offered reads |")
@@ -1337,8 +1348,9 @@ def test_replcap_report_outcomes_and_flags():
     rows = {line.split(" | ")[0][2:]: line for line in table}
     assert "| 6.80M at 800 readers | in sync at every step; reads level off |" in rows["custom"]
     assert "| at least 2.26M at 50 readers | falls out of sync between 50 and 100 readers |" in rows["stock"]
-    assert ("| 6.63M at 100 readers | unstable: out of sync at 200 (2/3 fell behind), in sync at 400, 800 |"
-            in rows["rr"])
+    assert ("| 6.63M at 100 readers | unstable: out of sync at 200 (2/3 fell behind), 400 (1/3 fell behind), "
+            "in sync at 800 |" in rows["rr"])
+    assert "| 5.00M at 100 readers | unstable: out of sync at 200 (1/3 fell behind), in sync at 400 |" in rows["late"]
     assert "| at least 6.00M at 800 readers | in sync at every step; reads still rising" in rows["wide"]
     assert "| at least 22.00M at 800 readers | not reached:" in rows["gen"]
     raw = out.splitlines()
@@ -1346,10 +1358,34 @@ def test_replcap_report_outcomes_and_flags():
     assert any(l.startswith("| custom | 50 | 3/3 |") and l.endswith("| RTT |") for l in raw)
     assert any(l.startswith("| custom | 100 | 3/3 |") and l.endswith("|  |") for l in raw)
     assert any(l.startswith("| stock | 100 | 0/3 |") and l.endswith("invalid, fell behind 3/3 |") for l in raw)
-    assert any(l.startswith("| rr | 400 | 2/3 |") and l.endswith("1 rep fell behind |") for l in raw)
+    assert any(l.startswith("| rr | 400 | 2/3 | | | | |") and l.endswith("invalid, fell behind 1/3 |") for l in raw)
+    assert any(l.startswith("| late | 200 | 2/3 | | | | |") and l.endswith("invalid, fell behind 1/3 |") for l in raw)
+    assert any(l.startswith("| flaky 7/9 | 100 | 2/3 | 800k |") and l.endswith("| 1/3 invalid: primary asserted |")
+               for l in raw)
     assert any(l.startswith("| gen | 800 |") and "GEN" in l for l in raw)
     assert "3 records with other primary loads" in out
     assert "targets: X 782k writes/s, Y 988k reads/s" in out
+    assert [replcap.fmt_rate(k) for k in (999.4, 999.6, 6846.0)] == ["999k", "1.00M", "6.85M"]
+
+
+def test_sweep_summary_one_lagging_rep_fails_the_point_and_caps_the_ceiling():
+    import copy
+    from offbench import repl
+    base = _rec_with()
+
+    def at(n, read, behind=False):
+        r = copy.deepcopy(base)
+        r["cell"].update(conns=n, write_conns=64)
+        r["replica"]["read_kcmd_s"] = read
+        if behind:
+            r["valid"], r["invalid"] = False, [f"{repl.LAGGING}: applied 90% of primary writes, lag +3.0 MB/s"]
+        return r
+    recs = [at(100, 5000.0) for _ in range(3)]
+    recs += [at(200, 5500.0), at(200, 5500.0), at(200, 5600.0, behind=True)]
+    recs += [at(400, 7000.0) for _ in range(3)]
+    out = repl.sweep_summary(recs)
+    assert "2/3  INVALID: replica fell behind in 1/3 reps" in out
+    assert out.splitlines()[-1].split()[-2:] == ["5000", "100"]
 
 
 def test_sweep_summary_needs_a_majority_and_keeps_primary_loads_apart():
