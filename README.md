@@ -21,7 +21,10 @@ offbench/
   offbench/deploy.py     rsync source + start the worker in tmux on a host
   offbench/sync.py       pull each host's results/status/queue back; merge (deduped)
   offbench/merge.py      fold a per-host results.jsonl into the shared file, idempotent on record_id
+  offbench/repl.py       primary/replica reps across hosts: orchestrator, host agent, validity
+  offbench/replcap.py    replica read capacity: calibration search and the result table
   offbench/cli.py        offbench queue|run|backfill|compare|export|publish|serve|hosts|push|sync|status|dispatch|deploy
+                         |repl-calibrate|repl-run|repl-capacity|repl-summary
   offbench/__main__.py   package entrypoint (python3 -m offbench -> cli.main)
   __main__.py            project-root entrypoint (python3 -m offbench from the parent dir)
   vendor/cachecannon/    owned cachecannon source, pinned + auth baked in; built on the host
@@ -59,6 +62,9 @@ host on first task and caches the binary.
 OFFBENCH_KEY=../rig/<key>.pem OFFBENCH_KNOWN_HOSTS=../rig/known_hosts \
     python3 -m offbench deploy --hosts metal-2,metal-3
 ```
+
+`deploy --source-only` does the rsync alone, with no clone, worker or 12 h lease: that is all the
+`repl-*` commands need on a host, and they refuse to start while a host's copy differs from this checkout.
 
 ## Hosts and leases
 
@@ -113,13 +119,13 @@ during a measurement window. Every rep starts and ends with zero `valkey-server`
 
 ## Validity
 
-A rep is stored always, but counts toward a mean only when `main_active >= 98%`,
+For queue runs, a rep is stored always, but counts toward a mean only when `main_active >= 98%`,
 `asserts == 0`, clients reached the requested count and the generator reported no
 timeouts. `compare` prints no delta for a cell with fewer than two valid reps on a
 side; the dashboard hatches it. This encodes the saturation rule so nobody has to
-remember it.
+remember it. Primary/replica runs (`repl-*`) have their own rules, in the scenario doc below.
 
 ## Scenarios
 
 - [Replica read capacity](docs/replica-read-capacity.md): at X writes/s and Y reads/s on the primary, how
-  many reads/s the replica serves before it falls out of sync (`repl-run`).
+  many reads/s the replica serves before it falls out of sync (`repl-calibrate`, `repl-run`, `repl-capacity`).

@@ -24,6 +24,7 @@ either exceeds --max-rtt-ms: a far generator measures the network, not the serve
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -58,11 +59,19 @@ ALLOWANCE_FIELDS = ("bw_in_allowance_exceeded", "bw_out_allowance_exceeded",
                     "pps_allowance_exceeded", "conntrack_allowance_exceeded")
 # invalid_reasons() prefix for a replica that did not keep up with the primary's writes.
 LAGGING = "replica fell behind"
+# A rep whose primary delivered its target writes or reads more than this far off is invalid.
+DRIFT_TOL = 0.07
 
 HOME = Path.home()
 CLI = HOME / "base" / "src" / "valkey-cli"
 CACHECANNON = HOME / "offbench-src" / "vendor" / "cachecannon" / "target" / "release" / "cachecannon"
 WORK = HOME / "offbench" / "repl-work"
+PACKAGE = Path(__file__).resolve().parent
+
+
+def code_hashes(pkg: Path = PACKAGE) -> dict:
+    """sha256 of every module in the package, so the orchestrator can tell a host runs the same code."""
+    return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(pkg.glob("*.py"))}
 
 
 # ------------------------------------------------------------ host side ----
@@ -177,6 +186,17 @@ def agent(a: dict) -> dict:
 
     if act == "ip":
         return {"ip": _run(["hostname", "-I"]).stdout.split()[0]}
+
+    if act == "preflight":
+        out = {"code": code_hashes(), "cli": CLI.exists(), "cachecannon": CACHECANNON.exists(),
+               "missing_servers": [s for s in a["servers"] if not Path(s).exists()]}
+        if a.get("pintune"):
+            try:
+                check_pintune()
+                out["pintune"] = True
+            except CellError as e:
+                out["pintune"] = str(e)
+        return out
 
     if act == "rtt":
         procs = {ip: subprocess.Popen(["ping", "-n", "-c", str(a.get("count", 25)), "-i", "0.2", ip],
@@ -334,6 +354,8 @@ class ReplCell:
     p_conns: int = 0
     # Main and io_thd_1 share one core (io-threads N on N-1 cores).
     pin_share: int = 0
+    # Primary readers' pipeline; 0 means the same as the replica readers (pipeline above).
+    p_pipeline: int = 0
 
     @property
     def w_conns(self) -> int:
@@ -343,12 +365,21 @@ class ReplCell:
     def w_pipeline(self) -> int:
         return self.write_pipeline or self.pipeline
 
+    @property
+    def pp_pipeline(self) -> int:
+        return self.p_pipeline or self.pipeline
+
+    @property
+    def cores(self) -> int:
+        """Cores per server: a shared-core build runs one more IO thread than it has cores."""
+        return self.io_threads - self.pin_share
+
     def key(self) -> str:
         if not (self.write_conns or self.write_pipeline):
             return f"rw-P{self.pipeline}-c{self.conns}-iot{self.io_threads}" + ("-acl" if self.acl else "")
         return (f"w{self.w_conns}xP{self.w_pipeline}-r{self.conns}xP{self.pipeline}"
                 + ("@primary" if self.read_target == "primary" else "")
-                + (f"-p{self.p_conns}xP{self.pipeline}" if self.p_conns else "") + f"-iot{self.io_threads}"
+                + (f"-p{self.p_conns}xP{self.pp_pipeline}" if self.p_conns else "") + f"-iot{self.io_threads}"
                 + ("-shared" if self.pin_share else "")
                 + ("-acl" if self.acl else ""))
 
@@ -371,6 +402,11 @@ class ReplCell:
             return TRI_CPUS[gen], TRI_THREADS[gen]
         return (WRITER_CPUS, 39) if gen == "writer" else (READER_CPUS, 40)
 
+    def threads(self, gen: str, reader_host: bool = False) -> int:
+        """cachecannon threads for one generator: one per core, and at least one connection per thread."""
+        conns = {"writer": self.w_conns, "preader": self.p_conns, "reader": self.conns}[gen]
+        return min(self.cpus(gen, reader_host)[1], conns)
+
 
 @dataclass
 class ReplBin:
@@ -379,13 +415,19 @@ class ReplBin:
     replica_args: str = ""  # extra server arguments on the replica only, e.g. "--keyspace-shard-bits 10"
     # Runs one more IO thread than the cell with main and io_thd_1 on one core, so it uses the same cores.
     share: int = 0
-    # Writer connections for this build only (0 = the cell's), to match builds on the primary's write rate.
+    # This build's primary load, overriding the cell's (0 = the cell's): set per build so every build's
+    # primary delivers the same writes/s and reads/s (repl-calibrate).
     write_conns: int = 0
+    p_conns: int = 0
+    write_pipeline: int = 0
+    p_pipeline: int = 0
 
     def cell_for(self, c: ReplCell) -> ReplCell:
         if self.share:
             c = replace(c, io_threads=c.io_threads + 1, pin_share=1)
-        return replace(c, write_conns=self.write_conns) if self.write_conns else c
+        over = {k: getattr(self, k) for k in ("write_conns", "p_conns", "write_pipeline", "p_pipeline")
+                if getattr(self, k)}
+        return replace(c, **over) if over else c
 
     @classmethod
     def parse(cls, spec: str) -> "ReplBin":
@@ -455,6 +497,45 @@ def far_paths(rtt: dict, max_ms: float) -> dict:
     """Generator paths whose median round trip exceeds max_ms (or that got no replies)."""
     return {k: (v or {}).get("median_ms") for k, v in rtt.items()
             if k.startswith("gen_") and (v is None or v["median_ms"] > max_ms)}
+
+
+SYNC_HINT = "sync it with: python3 -m offbench deploy --source-only --hosts <hosts>"
+
+
+def preflight(ssh: Ssh, roles: dict, bins: list[ReplBin], pin: int = 1) -> list[str]:
+    """What is missing or stale on the hosts before a run; empty when it can start.
+
+    Server hosts need every build, valkey-cli and (pinned) pintune; generator hosts need cachecannon built
+    under ~/offbench-src; every host must run the same offbench code as this checkout, since the host side
+    of a rep is this package's repl-agent."""
+    local = code_hashes()
+    servers = sorted({b.server for b in bins})
+    waits = {}
+    for role, h in roles.items():
+        srv = role in ("primary", "replica")
+        waits[role] = ssh.start(h, {"action": "preflight", "servers": servers if srv else [],
+                                    "pintune": bool(pin) and srv})
+    problems = []
+    for role, w in waits.items():
+        h = roles[role]
+        try:
+            got = w(timeout=60)
+        except CellError as e:
+            problems.append(f"{h.name}: host offbench predates preflight; {SYNC_HINT}" if "unknown action" in str(e)
+                            else f"{h.name}: {e}")
+            continue
+        stale = sorted(f for f, digest in local.items() if got["code"].get(f) != digest)
+        if stale:
+            problems.append(f"{h.name}: ~/offbench-src differs from this checkout in {', '.join(stale)}; {SYNC_HINT}")
+        if role in ("primary", "replica"):
+            problems += [f"{h.name}: no build at {s}" for s in got["missing_servers"]]
+            if not got["cli"]:
+                problems.append(f"{h.name}: no valkey-cli at ~/base/src/valkey-cli")
+            if got.get("pintune") not in (True, None):
+                problems.append(f"{h.name}: {got['pintune']}")
+        elif not got["cachecannon"]:
+            problems.append(f"{h.name}: cachecannon not built at ~/offbench-src/vendor/cachecannon/target/release")
+    return problems
 
 
 def _delta(a: dict, b: dict, k: str) -> float:
@@ -555,6 +636,8 @@ def invalid_reasons(rec: dict) -> list[str]:
             why.append(f"{g} generator died: {gg.get('err_tail')}")
         if gg.get("timeouts"):
             why.append(f"{g} timeouts={gg['timeouts']}")
+        if gg.get("err_pct"):
+            why.append(f"{g} reported {gg['err_pct']:g}% errors")
     for host, ena in (("primary", p["ena"]), ("replica", r["ena"]), ("gen", rec["gen_ena"]),
                       ("reader gen", rec.get("rgen_ena") or {})):
         hit = {k: v for k, v in ena.items() if v}
@@ -566,6 +649,11 @@ def invalid_reasons(rec: dict) -> list[str]:
     pw += c.get("p_conns") or 0
     if p["clients"] < pw or r["clients"] < rw:
         why.append(f"clients primary={p['clients']}<{pw} or replica={r['clients']}<{rw}")
+    # A calibrated run holds the primary at X writes/s and Y reads/s; a rep that drifted answers another question.
+    t = rec.get("targets") or {}
+    for k, what in (("write_kcmd_s", "writes"), ("read_kcmd_s", "reads")):
+        if t.get(k) and abs(p[k] / t[k] - 1) > t.get("tol", DRIFT_TOL):
+            why.append(f"primary {what} {p[k]:.0f}k/s, {p[k] / t[k] - 1:+.1%} off target {t[k]:.0f}k/s")
     # A replica that skips writes frees its own capacity for reads, so its read rate is not a result.
     if not keeps_up(rec):
         applied = 100.0 * r["set_kcmd_s"] / p["write_kcmd_s"] if p["write_kcmd_s"] else 0.0
@@ -603,20 +691,20 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
     if not ssh.call(G, {"action": "gen_start", "name": "writer", "workload": "set", "target_ip": P.ip,
                         "pipeline": cell.w_pipeline, "conns": cell.w_conns, "prefill": True,
                         "cpus": cell.cpus("writer", own)[0],
-                        "threads": min(cell.cpus("writer", own)[1], cell.w_conns), "duration_s": 240, **gen})["alive"]:
+                        "threads": cell.threads("writer", own), "duration_s": 240, **gen})["alive"]:
         raise CellError("writer did not start")
     wait_for("replica prefill", lambda: ssh.call(R, {"action": "status", "acl": acl})["dbsize"] >= cell.keys, 60)
     rt = P if cell.read_target == "primary" else R
     if cell.conns and not ssh.call(RG or G, {"action": "gen_start", "name": "reader", "workload": "get", "target_ip": rt.ip,
                                              "pipeline": cell.pipeline, "conns": cell.conns, "prefill": False,
                                              "cpus": cell.cpus("reader", own)[0],
-                                             "threads": min(cell.cpus("reader", own)[1], cell.conns),
+                                             "threads": cell.threads("reader", own),
                                              "duration_s": 200, **gen})["alive"]:
         raise CellError("reader did not start")
     if cell.p_conns and not ssh.call(G, {"action": "gen_start", "name": "preader", "workload": "get", "target_ip": P.ip,
-                                         "pipeline": cell.pipeline, "conns": cell.p_conns, "prefill": False,
+                                         "pipeline": cell.pp_pipeline, "conns": cell.p_conns, "prefill": False,
                                          "cpus": cell.cpus("preader", own)[0],
-                                         "threads": min(cell.cpus("preader", own)[1], cell.p_conns),
+                                         "threads": cell.threads("preader", own),
                                          "duration_s": 200, **gen})["alive"]:
         raise CellError("primary reader did not start")
 
@@ -663,6 +751,8 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
     gens = ssh.call(G, {"action": "gen_stop", "gens": g_gens, **stop})
     if rg_gens:
         gens.update(ssh.call(RG, {"action": "gen_stop", "gens": rg_gens, **stop}))
+    for g in gens:
+        gens[g]["threads"] = cell.threads(g, own)
     stops = {"primary": ssh.call(P, {"action": "server_stop", "role": "primary", "server": b.server}),
              "replica": ssh.call(R, {"action": "server_stop", "role": "replica", "server": b.server})}
     return build_record(cell, b, rep, roles, pm, rm, gm, gens, stops, window_s, run_id, rgm=rgm)
@@ -677,8 +767,9 @@ def cleanup(ssh: Ssh, roles: dict, all_servers: list[str]) -> None:
 
 
 def run_matrix(ssh: Ssh, roles: dict, cells: list[ReplCell], bins: list[ReplBin], reps: int, out: Path,
-               window_s: int = 6, log: Callable[[str], None] = print, meta: Optional[dict] = None) -> int:
-    run_id = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+               window_s: int = 6, log: Callable[[str], None] = print, meta: Optional[dict] = None,
+               run_id: Optional[str] = None, collect: Optional[list] = None) -> int:
+    run_id = run_id or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     items = plan(cells, bins, reps)
     all_servers = [b.server for b in bins]
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -697,8 +788,11 @@ def run_matrix(ssh: Ssh, roles: dict, cells: list[ReplCell], bins: list[ReplBin]
                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
             errors_in_row += 1
         rec.update(meta or {})
+        revalidate(rec)   # meta can carry targets the rep is judged against
         with out.open("a") as f:
             f.write(json.dumps(rec) + "\n")
+        if collect is not None:
+            collect.append(rec)
         if "error" in rec:
             log(f"[{i}/{len(items)}] {b.name:<8} {c.key():<22} rep{rep}: ERROR {rec['error']}")
             if errors_in_row >= 3:
@@ -767,41 +861,44 @@ def keeps_up(r: dict) -> bool:
 
 
 def sweep_summary(recs: list[dict]) -> str:
-    """Read-client sweep: per point medians, then each build's sustainable read ceiling."""
+    """Read-client sweep: per point medians, then each build's sustainable read ceiling.
+
+    Points are grouped by cores per server, the primary's load (writers, primary readers) and build, so a
+    calibration probe never merges into a sweep step. A point needs valid reps in a majority of all its reps."""
     groups: dict = {}
     for r in recs:
         if "error" in r or r.get("schema", 1) < 2:
             continue
         c = r["cell"]
-        k = (c["io_threads"], c["pipeline"], c["conns"], r["bin"]["name"])
+        k = (c["io_threads"] - (c.get("pin_share") or 0), c["pipeline"], r["bin"]["name"],
+             c.get("write_conns") or c["conns"], c.get("p_conns") or 0, c["conns"])
         groups.setdefault(k, []).append(r)
     med = lambda xs: statistics.median(xs) if xs else float("nan")
-    rows = ["iot  P  rconns  build     valid  write k/s  apply k/s  read k/s  r.main%  lag+MB/s  keeps-up  r.p99us"]
+    rows = ["cores  P  build     wconn pconn rconns  valid  write k/s  apply k/s  read k/s  r.main%  lag+MB/s  r.p99us"]
     ceil: dict = {}
     for k in sorted(groups):
         rs = groups[k]
         v = [x for x in rs if x["valid"]]
-        # Reps whose only fault is a lagging replica still count toward "most reps keep up".
         behind = [x for x in rs if x.get("invalid") and all(w.startswith(LAGGING) for w in x["invalid"])]
-        judged = len(v) + len(behind)
-        if not v:
-            rows.append(f"{k[0]:>3} {k[1]:>2} {k[2]:>7}  {k[3]:<8} 0/{len(rs)}  INVALID: "
-                        + (f"{LAGGING} in {len(behind)}/{judged} reps" if behind else "no valid reps"))
+        head = f"{k[0]:>5} {k[1]:>2}  {k[2]:<8} {k[3]:>5} {k[4]:>5} {k[5]:>6}  {len(v)}/{len(rs)}"
+        if len(v) * 2 <= len(rs):
+            why = (f"{LAGGING} in {len(behind)}/{len(rs)} reps" if behind
+                   else next((x["invalid"][0] for x in rs if x.get("invalid")), "no valid reps"))
+            rows.append(f"{head}  INVALID: {why}")
             continue
-        up = len(v)
         read = med([x["replica"]["read_kcmd_s"] for x in v])
         rows.append(
-            f"{k[0]:>3} {k[1]:>2} {k[2]:>7}  {k[3]:<8} {len(v)}/{len(rs)}  "
-            f"{med([x['primary']['write_kcmd_s'] for x in v]):9.0f}  {med([x['replica']['set_kcmd_s'] for x in v]):9.0f}  "
+            f"{head}  {med([x['primary']['write_kcmd_s'] for x in v]):9.0f}  {med([x['replica']['set_kcmd_s'] for x in v]):9.0f}  "
             f"{read:8.0f}  {med([x['replica']['main_cpu_pct'] for x in v]):7.1f}  "
-            f"{med([x['lag_growth_mb_s'] for x in v]):8.1f}  {up}/{judged}      "
+            f"{med([x['lag_growth_mb_s'] for x in v]):8.1f}  "
             f"{med([((x['reader'] or {}).get('latency') or {}).get('p99_us') or 0 for x in v]):7.0f}")
-        ck = (k[0], k[1], k[3])
-        if up * 2 > judged and (ck not in ceil or read > ceil[ck][0]):
-            ceil[ck] = (read, k[2])
-    rows += ["", "sustainable read ceiling (highest median read rate where most valid reps keep up)",
-             "iot  P  build     read k/s  at rconns"]
-    for ck in sorted({(k[0], k[1], k[3]) for k in groups}):
+        ck = k[:5]
+        if k[5] and (ck not in ceil or read > ceil[ck][0]):
+            ceil[ck] = (read, k[5])
+    rows += ["", "sustainable read ceiling (highest median read rate over points in sync)",
+             "cores  P  build     wconn pconn  read k/s  at rconns"]
+    for ck in sorted({k[:5] for k in groups}):
         c = ceil.get(ck)
-        rows.append(f"{ck[0]:>3} {ck[1]:>2}  {ck[2]:<8} " + (f"{c[0]:8.0f}  {c[1]:>9}" if c else "       -  never"))
+        rows.append(f"{ck[0]:>5} {ck[1]:>2}  {ck[2]:<8} {ck[3]:>5} {ck[4]:>5} "
+                    + (f"{c[0]:8.0f}  {c[1]:>9}" if c else "       -  never"))
     return "\n".join(rows)

@@ -9,6 +9,9 @@
   offbench publish                    export, then commit + push dash/ into the ratatoskr view-model repo
   offbench serve [--port 8765]        dashboard on 127.0.0.1
   offbench push <task.json> / sync    move tasks to and results from the rig over ssh
+  offbench repl-calibrate / repl-run / repl-capacity / repl-summary
+                                      primary/replica runs across hosts (docs/replica-read-capacity.md)
+  offbench deploy --source-only       rsync this checkout to hosts for repl-run, no worker
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 
 from . import analysis, backfill, export
 from . import deploy as deploy_mod
@@ -427,6 +431,23 @@ def cmd_deploy(a: argparse.Namespace) -> int:
         print(f"deploy: {e}", file=sys.stderr)
         return 2
     from . import lease as lease_mod
+    # The synced tree must mirror the project root: it holds the inner
+    # ``offbench/`` package AND the sibling ``vendor/cachecannon`` source, so
+    # ``cd {src_dest} && python3 -m offbench`` resolves the package and the
+    # runner's ``parent.parent/vendor`` finds the vendored cachecannon. The
+    # package dir alone (this file's parent) lacks vendor/, so default to the
+    # project root (its parent).
+    package_dir = Path(a.package_dir) if a.package_dir else Path(__file__).resolve().parent.parent
+    if a.source_only:
+        cfg = deploy_mod.SshConfig(key=a.key or None, known_hosts=a.known_hosts or None,
+                                   strict_host_key=_strict_known_hosts(a.known_hosts), src_dest=a.src_dest)
+        try:
+            with lease_mod.held([h.name for h in targets], "offbench deploy --source-only", registry=reg.path):
+                results = [deploy_mod.sync_source(h, cfg, package_dir) for h in targets]
+        except lease_mod.LeaseError as e:
+            print(f"deploy: {e}", file=sys.stderr)
+            return 2
+        return _print_deploy(results)
     try:
         lease_mod.claim([h.name for h in targets], "offbench deploy (worker)", registry=reg.path)
     except lease_mod.LeaseError as e:
@@ -441,14 +462,10 @@ def cmd_deploy(a: argparse.Namespace) -> int:
         repo=a.repo,
         cli=a.cli,
     )
-    # The synced tree must mirror the project root: it holds the inner
-    # ``offbench/`` package AND the sibling ``vendor/cachecannon`` source, so
-    # ``cd {src_dest} && python3 -m offbench`` resolves the package and the
-    # runner's ``parent.parent/vendor`` finds the vendored cachecannon. The
-    # package dir alone (this file's parent) lacks vendor/, so default to the
-    # project root (its parent).
-    package_dir = Path(a.package_dir) if a.package_dir else Path(__file__).resolve().parent.parent
-    results = deploy_mod.deploy_hosts(targets, cfg, package_dir)
+    return _print_deploy(deploy_mod.deploy_hosts(targets, cfg, package_dir))
+
+
+def _print_deploy(results) -> int:
     rc = 0
     for r in results:
         head = "OK" if r.ok else ("SKIP" if r.skipped else "FAIL")
@@ -596,61 +613,65 @@ def cmd_repl_agent(a: argparse.Namespace) -> int:
     return repl.agent_main(a.payload)
 
 
-def cmd_repl_run(a: argparse.Namespace) -> int:
-    from . import lease as lease_mod
-    from . import repl
-    registry = hosts_mod.load_registry(a.hosts_file)
-    reg = registry.hosts
-    names = {"primary": a.primary, "replica": a.replica, "gen": a.gen, **({"rgen": a.reader_gen} if a.reader_gen else {})}
+KEY_MSG = ("{cmd} needs the ssh key and known-hosts file: pass --key and --known-hosts, or set OFFBENCH_KEY and "
+           "OFFBENCH_KNOWN_HOSTS")
+# Flags a calibration file sets itself; repl-run refuses them alongside --calibration.
+CAL_OWNED = ("bins", "iot", "share_bins", "bin_write_conns", "bin_p_conns")
+
+
+def _repl_names(a: argparse.Namespace, cal: Optional[dict] = None):
+    """Role -> host name from the flags, filled from (and checked against) a calibration's hosts."""
+    flags = {"primary": a.primary, "replica": a.replica, "gen": a.gen, "rgen": a.reader_gen}
+    opt = {"primary": "--primary", "replica": "--replica", "gen": "--gen", "rgen": "--reader-gen"}
+    for role, host in ((cal or {}).get("hosts") or {}).items():
+        if flags.get(role) and flags[role] != host:
+            return f"{opt[role]} {flags[role]} differs from the calibration's {host}: it holds on the hosts it ran on"
+        flags[role] = host
+    if not all(flags[k] for k in ("primary", "replica", "gen")):
+        return "--primary, --replica and --gen are required"
+    return {k: v for k, v in flags.items() if v}
+
+
+def _repl_hosts(a: argparse.Namespace, cal: Optional[dict] = None):
+    """(names, registry) for a repl command, or an error message."""
+    names = _repl_names(a, cal)
+    if isinstance(names, str):
+        return names
     if len(set(names.values())) != len(names):
-        print("primary, replica, gen and reader-gen must be distinct hosts", file=sys.stderr)
-        return 2
-    missing = [n for n in names.values() if n not in reg]
+        return "primary, replica, gen and reader-gen must be distinct hosts"
+    registry = hosts_mod.load_registry(a.hosts_file)
+    missing = [n for n in names.values() if n not in registry.hosts]
     if missing:
-        print(f"no host named {', '.join(missing)}; known: {', '.join(sorted(reg)) or '(none)'}", file=sys.stderr)
-        return 2
-    try:
-        with lease_mod.held(list(names.values()), f"offbench repl-run {Path(a.out).stem}", registry=registry.path):
-            return _repl_run(a, repl, reg, names)
-    except lease_mod.LeaseError as e:
-        print(f"repl-run: {e}", file=sys.stderr)
-        return 2
+        return f"no host named {', '.join(missing)}; known: {', '.join(sorted(registry.hosts)) or '(none)'}"
+    return names, registry
 
 
-def _repl_run(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
-    ssh = repl.Ssh(a.key, a.known_hosts)
-    roles = {}
-    for role, name in names.items():
-        h = reg[name]
-        tmp = repl.Role(h.name, h.ssh, "")
-        roles[role] = repl.Role(h.name, h.ssh, ssh.call(tmp, {"action": "ip"})["ip"])
-    bins = [repl.ReplBin.parse(kv) for kv in a.bins.split(",")]
-    share = {s for s in a.share_bins.split(",") if s}
-    if share - {b.name for b in bins} or (share and a.pin_share):
-        print("--share-bins must name builds in --bins and cannot be combined with --pin-share", file=sys.stderr)
-        return 2
-    for b in bins:
-        b.share = int(b.name in share)
-    bwc = dict(kv.split("=", 1) for kv in a.bin_write_conns.split(",") if kv)
-    if set(bwc) - {b.name for b in bins}:
-        print("--bin-write-conns must name builds in --bins", file=sys.stderr)
-        return 2
-    for b in bins:
-        b.write_conns = int(bwc.get(b.name, 0))
-    ints = lambda s: [int(x) for x in s.split(",")]
-    cells = [repl.ReplCell(pipeline=p, conns=c, io_threads=t, acl=acl, write_conns=wc, write_pipeline=a.write_pipeline,
-                           read_target=a.read_target, p_conns=a.p_conns, pin_share=int(a.pin_share))
-             for acl in ints(a.acl) for t in ints(a.iot) for p in ints(a.pipelines)
-             for wc in ints(a.write_conns) for c in ints(a.conns)]
-    if a.limit:
-        cells = cells[:a.limit]
-    log_path = Path(a.out).with_suffix(".log")
+def _repl_log(out: Path):
+    log_path = out.with_suffix(".log")
 
     def log(msg: str) -> None:
         line = time.strftime("%Y-%m-%dT%H:%M:%SZ ", time.gmtime()) + msg
         print(line, flush=True)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a") as f:
             f.write(line + "\n")
+    return log
+
+
+def _repl_open(a: argparse.Namespace, repl, reg: dict, names: dict, bins: list, log):
+    """Resolve the hosts' private IPs, check they can run these builds, and gate on the generators' round
+    trip. Returns (ssh, roles, rtt), or an exit code."""
+    ssh = repl.Ssh(a.key, a.known_hosts)
+    roles = {}
+    for role, name in names.items():
+        h = reg[name]
+        roles[role] = repl.Role(h.name, h.ssh, ssh.call(repl.Role(h.name, h.ssh, ""), {"action": "ip"})["ip"])
+    problems = repl.preflight(ssh, roles, bins, pin=1)
+    if problems:
+        for p in problems:
+            log(f"preflight: {p}")
+        log("refusing: fix the hosts above first")
+        return 2
     rtt = repl.measure_rtt(ssh, roles)
     log("median rtt ms: " + ", ".join(f"{k} {(v or {}).get('median_ms', float('nan')):.3f}" for k, v in rtt.items()))
     far = repl.far_paths(rtt, a.max_rtt_ms)
@@ -658,8 +679,199 @@ def _repl_run(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
         log(f"refusing: generator round trip above {a.max_rtt_ms} ms on {far}; a closed-loop client then "
             "measures the network, not the server (pick closer hosts or pass --max-rtt-ms 0)")
         return 2
-    return repl.run_matrix(ssh, roles, cells, bins, a.reps, Path(a.out), window_s=a.window, log=log,
-                           meta={"rtt_ms": rtt})
+    return ssh, roles, rtt
+
+
+def _kv(spec: Optional[str]) -> dict:
+    return dict(kv.split("=", 1) for kv in (spec or "").split(",") if kv)
+
+
+def cmd_repl_run(a: argparse.Namespace) -> int:
+    from . import lease as lease_mod
+    from . import repl
+    if not (a.key and a.known_hosts):
+        print(KEY_MSG.format(cmd="repl-run"), file=sys.stderr)
+        return 2
+    cal = None
+    if a.calibration:
+        cal = json.loads(Path(a.calibration).read_text())
+        given = [f"--{k.replace('_', '-')}" for k in CAL_OWNED if getattr(a, k) is not None]
+        if given:
+            print(f"--calibration sets the builds, cores and each build's primary load; drop {', '.join(given)}",
+                  file=sys.stderr)
+            return 2
+        if not cal.get("converged"):
+            bad = [b for b, v in cal["builds"].items() if not v["converged"]]
+            print(f"calibration {a.calibration} did not converge for {', '.join(bad)}; rerun repl-calibrate",
+                  file=sys.stderr)
+            return 2
+    got = _repl_hosts(a, cal)
+    if isinstance(got, str):
+        print(got, file=sys.stderr)
+        return 2
+    names, registry = got
+    try:
+        with lease_mod.held(list(names.values()), f"offbench repl-run {Path(a.out).stem}", registry=registry.path):
+            return _repl_run(a, repl, registry.hosts, names, cal)
+    except lease_mod.LeaseError as e:
+        print(f"repl-run: {e}", file=sys.stderr)
+        return 2
+
+
+def _repl_bins(a: argparse.Namespace, repl, cal: Optional[dict]):
+    """The builds of a run, each with its own primary load; (bins, error)."""
+    if cal:
+        bins = [repl.ReplBin.parse(f"{n}={spec}") for n, spec in cal["bins"].items()]
+        for b in bins:
+            s = cal["builds"][b.name]["shape"]
+            b.share = int(b.name in cal.get("share_bins", []))
+            b.write_conns, b.write_pipeline, b.p_conns, b.p_pipeline = s["w"], s["wp"], s["p"], s["pp"]
+        return bins, None
+    if not a.bins:
+        return None, "--bins is required (or --calibration)"
+    bins = [repl.ReplBin.parse(kv) for kv in a.bins.split(",")]
+    known = {b.name for b in bins}
+    share = {s for s in (a.share_bins or "").split(",") if s}
+    if share - known or (share and a.pin_share):
+        return None, "--share-bins must name builds in --bins and cannot be combined with --pin-share"
+    bwc, bpc = _kv(a.bin_write_conns), _kv(a.bin_p_conns)
+    if set(bwc) - known or set(bpc) - known:
+        return None, "--bin-write-conns and --bin-p-conns must name builds in --bins"
+    for b in bins:
+        b.share = int(b.name in share)
+        b.write_conns, b.p_conns = int(bwc.get(b.name, 0)), int(bpc.get(b.name, 0))
+    return bins, None
+
+
+def _repl_run(a: argparse.Namespace, repl, reg: dict, names: dict, cal: Optional[dict] = None) -> int:
+    bins, err = _repl_bins(a, repl, cal)
+    if err:
+        print(err, file=sys.stderr)
+        return 2
+    ints = lambda s: [int(x) for x in s.split(",")]
+    iots = [cal["iot"]] if cal else ints(a.iot or "2,4,8,16")
+    cells = [repl.ReplCell(pipeline=p, conns=c, io_threads=t, acl=acl, write_conns=wc, write_pipeline=a.write_pipeline,
+                           read_target=a.read_target, p_conns=a.p_conns, pin_share=int(a.pin_share),
+                           p_pipeline=a.p_pipeline)
+             for acl in ints(a.acl) for t in iots for p in ints(a.pipelines)
+             for wc in ints(a.write_conns) for c in ints(a.conns)]
+    if a.limit:
+        cells = cells[:a.limit]
+    log = _repl_log(Path(a.out))
+    opened = _repl_open(a, repl, reg, names, bins, log)
+    if isinstance(opened, int):
+        return opened
+    ssh, roles, rtt = opened
+    meta = {"rtt_ms": rtt}
+    if cal:
+        meta["targets"] = dict(cal["targets"], tol=repl.DRIFT_TOL)
+        meta["calibration"] = {"id": cal["id"], "path": str(a.calibration)}
+        log(f"calibration {cal['id']}: targets {cal['targets']['write_kcmd_s']:.0f}k writes/s, "
+            f"{cal['targets']['read_kcmd_s']:.0f}k reads/s; " + ", ".join(
+                f"{b.name} {b.write_conns}xP{b.write_pipeline}/{b.p_conns}xP{b.p_pipeline}" for b in bins))
+    return repl.run_matrix(ssh, roles, cells, bins, a.reps, Path(a.out), window_s=a.window, log=log, meta=meta)
+
+
+def cmd_repl_calibrate(a: argparse.Namespace) -> int:
+    from . import lease as lease_mod
+    from . import repl
+    if not (a.key and a.known_hosts):
+        print(KEY_MSG.format(cmd="repl-calibrate"), file=sys.stderr)
+        return 2
+    got = _repl_hosts(a)
+    if isinstance(got, str):
+        print(got, file=sys.stderr)
+        return 2
+    names, registry = got
+    try:
+        with lease_mod.held(list(names.values()), f"offbench repl-calibrate {Path(a.out).stem}",
+                            registry=registry.path):
+            return _repl_calibrate(a, repl, registry.hosts, names)
+    except lease_mod.LeaseError as e:
+        print(f"repl-calibrate: {e}", file=sys.stderr)
+        return 2
+
+
+def _repl_calibrate(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
+    from dataclasses import replace as _replace
+
+    from . import replcap
+    bins, err = _repl_bins(argparse.Namespace(bins=a.bins, share_bins=a.share_bins, pin_share=False,
+                                              bin_write_conns=None, bin_p_conns=None), repl, None)
+    if err:
+        print(err, file=sys.stderr)
+        return 2
+    out = Path(a.out)
+    if out.suffix != ".jsonl":
+        print("--out must end in .jsonl (the calibration is written beside it as .json)", file=sys.stderr)
+        return 2
+    log = _repl_log(out)
+    opened = _repl_open(a, repl, reg, names, bins, log)
+    if isinstance(opened, int):
+        return opened
+    ssh, roles, rtt = opened
+    cal_id = "cal-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    cores = int(a.iot)
+    base = repl.ReplCell(pipeline=a.p_pipeline, conns=0, io_threads=cores, write_pipeline=a.write_pipeline, p_conns=1)
+    runs = []
+
+    def measure(shapes: dict, reps: int, phase: str) -> dict:
+        run = [_replace(b, write_conns=shapes[b.name].w, write_pipeline=shapes[b.name].wp,
+                        p_conns=shapes[b.name].p, p_pipeline=shapes[b.name].pp) for b in bins if b.name in shapes]
+        runs.append(phase)
+        got: list = []
+        repl.run_matrix(ssh, roles, [base], run, reps, out, window_s=a.window, log=log,
+                        meta={"rtt_ms": rtt, "phase": phase, "calib_id": cal_id},
+                        run_id=f"{cal_id}-{len(runs):02d}-{phase}", collect=got)
+        res: dict = {}
+        for r in got:
+            res.setdefault(r["bin"]["name"], []).append(r)
+        return res
+
+    builds = [b.name for b in bins]
+    ref_shape = replcap.Shape(a.ref_writers or 6 * cores, a.write_pipeline, a.ref_p_conns, a.p_pipeline)
+    ref = None
+    try:
+        if a.targets:
+            x, y = (float(v) for v in a.targets.split(","))
+            seed = {}
+        else:
+            ref = replcap.reference(measure, builds, ref_shape, a.ref_reps)
+            x, y = ref["targets"]["write_kcmd_s"], ref["targets"]["read_kcmd_s"]
+            seed = {b: [(ref_shape, v["write_kcmd_s"], v["read_kcmd_s"])] for b, v in ref["builds"].items()}
+            log(f"reference {ref_shape.label()}: " + ", ".join(
+                f"{b} {v['write_kcmd_s']:.0f}k writes {v['read_kcmd_s']:.0f}k reads" for b, v in ref["builds"].items())
+                + f"; targets X {x:.0f}k, Y {y:.0f}k")
+        res = replcap.calibrate(measure, builds, x, y, {b: ref_shape for b in builds}, tol=a.tol,
+                                max_probes=a.max_probes, confirm_reps=a.confirm_reps, log=log, seed=seed)
+    except repl.CellError as e:
+        log(f"calibration failed: {e}")
+        return 1
+    finally:
+        repl.cleanup(ssh, roles, [b.server for b in bins])
+    doc = {"kind": "repl-calibration", "schema": 1, "id": cal_id,
+           "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "records": str(out),
+           "hosts": names, "bins": {kv.split("=", 1)[0]: kv.split("=", 1)[1] for kv in a.bins.split(",")},
+           "share_bins": sorted(b.name for b in bins if b.share), "iot": cores, "reference": ref, **res}
+    path = out.with_suffix(".json")
+    path.write_text(json.dumps(doc, indent=1) + "\n")
+    for b, v in res["builds"].items():
+        s = replcap.Shape(**v["shape"])
+        log(f"{b}: {s.label()} -> {v['write_kcmd_s']:.0f}k writes {v['write_kcmd_s'] / x - 1:+.1%}, "
+            f"{v['read_kcmd_s']:.0f}k reads {v['read_kcmd_s'] / y - 1:+.1%}" + ("" if v["converged"] else "  NOT CONVERGED"))
+    log(f"calibration written to {path}" + ("" if res["converged"] else " (not converged: repl-run will refuse it)"))
+    if res["converged"]:
+        log(f"next: python3 -m offbench repl-run --calibration {path} --conns 0,50,100,200,400,800 --pipelines 16 "
+            f"--reps 3 --out <sweep>.jsonl")
+    return 0 if res["converged"] else 1
+
+
+def cmd_repl_capacity(a: argparse.Namespace) -> int:
+    from . import repl, replcap
+    recs = repl.load(Path(a.path), a.run_id)
+    targets = tuple(float(v) for v in a.targets.split(",")) if a.targets else None
+    print(replcap.report(recs, targets))
+    return 0
 
 
 def cmd_repl_summary(a: argparse.Namespace) -> int:
@@ -804,35 +1016,75 @@ def main(argv=None) -> int:
     dep.add_argument("--remote-root", default="~/offbench", help="worker --root on the host")
     dep.add_argument("--repo", default="~/valkey", help="valkey clone the runner archives from")
     dep.add_argument("--cli", default="~/base/src/valkey-cli", help="valkey-cli on the host")
+    dep.add_argument("--source-only", action="store_true",
+                     help="only rsync the source (what repl-run's host side runs): no clone, no worker, no 12 h lease")
     dep.set_defaults(fn=cmd_deploy)
 
     ra = sub.add_parser("repl-agent", help="host side of repl-run (one JSON action)")
     ra.add_argument("payload"); ra.set_defaults(fn=cmd_repl_agent)
-    rr = sub.add_parser("repl-run", help="primary/replica write/read split across three hosts")
-    rr.add_argument("--primary", required=True); rr.add_argument("--replica", required=True)
-    rr.add_argument("--gen", required=True)
-    rr.add_argument("--reader-gen", default="", help="host for the replica readers (default: --gen)")
-    rr.add_argument("--bins", required=True, help="name=fullsha,... (built under ~/offbench/builds on the hosts)")
-    rr.add_argument("--pipelines", default="1,16"); rr.add_argument("--conns", default="2400,7000")
-    rr.add_argument("--iot", default="2,4,8,16"); rr.add_argument("--acl", default="0")
+
+    def repl_common(sp: argparse.ArgumentParser, hosts_required: bool = True) -> None:
+        sp.add_argument("--primary", required=hosts_required); sp.add_argument("--replica", required=hosts_required)
+        sp.add_argument("--gen", required=hosts_required,
+                        help="host for the writers and primary readers (and the replica readers without --reader-gen)")
+        sp.add_argument("--reader-gen", default="", help="host for the replica readers (default: --gen)")
+        sp.add_argument("--window", type=int, default=6, help="measurement window per rep, seconds")
+        sp.add_argument("--max-rtt-ms", type=float, default=0.15,
+                        help="refuse to run if the generator's median round trip to either server exceeds this (0 = off)")
+        sp.add_argument("--hosts-file", type=Path, default=None, help="registry path (default: the shared host registry)")
+        sp.add_argument("--key", default=os.environ.get("OFFBENCH_KEY"), help="ssh key (default $OFFBENCH_KEY)")
+        sp.add_argument("--known-hosts", default=os.environ.get("OFFBENCH_KNOWN_HOSTS"),
+                        help="ssh known-hosts file (default $OFFBENCH_KNOWN_HOSTS)")
+
+    rr = sub.add_parser("repl-run", help="primary/replica write/read split across three or four hosts")
+    repl_common(rr, hosts_required=False)
+    rr.add_argument("--calibration", default=None,
+                    help="repl-calibrate's .json: sets the hosts, builds, cores and each build's primary load, and "
+                         "judges every rep against its targets")
+    rr.add_argument("--bins", default=None, help="name=fullsha[|config value...],... (built under ~/offbench/builds "
+                                                 "on the hosts; the |configs go to the replica only)")
+    rr.add_argument("--pipelines", default="1,16", help="replica reader pipeline (list)")
+    rr.add_argument("--conns", default="2400,7000", help="replica reader connections (list)")
+    rr.add_argument("--iot", default=None, help="io-threads, one per core (list; default 2,4,8,16)")
+    rr.add_argument("--acl", default="0")
     rr.add_argument("--write-conns", default="0", help="fixed writer connections (list); 0 = same as --conns")
     rr.add_argument("--write-pipeline", type=int, default=0, help="fixed writer pipeline; 0 = same as reader")
     rr.add_argument("--read-target", choices=("replica", "primary"), default="replica")
-    rr.add_argument("--p-conns", type=int, default=0, help="extra GET readers on the primary (P = --pipelines)")
+    rr.add_argument("--p-conns", type=int, default=0, help="GET readers on the primary, all builds (0 = none)")
+    rr.add_argument("--p-pipeline", type=int, default=0, help="primary reader pipeline; 0 = same as --pipelines")
     rr.add_argument("--pin-share", action="store_true", help="main and io_thd_1 share one core")
-    rr.add_argument("--share-bins", default="",
+    rr.add_argument("--share-bins", default=None,
                     help="builds that run --iot+1 IO threads with main and io_thd_1 on one core (same cores as the rest)")
-    rr.add_argument("--bin-write-conns", default="",
+    rr.add_argument("--bin-write-conns", default=None,
                     help="name=N,...: writer connections for those builds, overriding --write-conns")
-    rr.add_argument("--reps", type=int, default=3); rr.add_argument("--window", type=int, default=6)
+    rr.add_argument("--bin-p-conns", default=None,
+                    help="name=N,...: primary reader connections for those builds, overriding --p-conns")
+    rr.add_argument("--reps", type=int, default=3)
     rr.add_argument("--limit", type=int, default=0, help="only the first N cells (canary)")
-    rr.add_argument("--max-rtt-ms", type=float, default=0.15,
-                    help="refuse to run if the generator's median round trip to either server exceeds this (0 = off)")
-    rr.add_argument("--out", default="data/repl/results.jsonl")
-    rr.add_argument("--hosts-file", type=Path, default=None, help="registry path (default: the shared host registry)")
-    rr.add_argument("--key", default=os.environ.get("OFFBENCH_KEY"))
-    rr.add_argument("--known-hosts", default=os.environ.get("OFFBENCH_KNOWN_HOSTS"))
+    rr.add_argument("--out", default="data/repl/results.jsonl", help="appended; a .log is written beside it")
     rr.set_defaults(fn=cmd_repl_run)
+
+    rc = sub.add_parser("repl-calibrate", help="per build, the primary load that delivers X writes/s and Y reads/s")
+    repl_common(rc)
+    rc.add_argument("--bins", required=True, help="as repl-run")
+    rc.add_argument("--share-bins", default="", help="as repl-run")
+    rc.add_argument("--iot", type=int, required=True, help="cores per server (io-threads; --share-bins builds get one more)")
+    rc.add_argument("--write-pipeline", type=int, default=16, help="writer pipeline to start from")
+    rc.add_argument("--p-pipeline", type=int, default=16, help="primary reader pipeline to start from")
+    rc.add_argument("--targets", default="", help="X,Y in k/s; default: the lowest writes and reads at the reference load")
+    rc.add_argument("--ref-writers", type=int, default=0, help="reference writer connections (default 6 per core)")
+    rc.add_argument("--ref-p-conns", type=int, default=25, help="reference primary reader connections")
+    rc.add_argument("--ref-reps", type=int, default=3)
+    rc.add_argument("--tol", type=float, default=0.05, help="accept a build within this of X and Y")
+    rc.add_argument("--max-probes", type=int, default=12, help="one-rep probes per build")
+    rc.add_argument("--confirm-reps", type=int, default=3)
+    rc.add_argument("--out", required=True, help="records (.jsonl, appended); the calibration is written beside it as .json")
+    rc.set_defaults(fn=cmd_repl_calibrate)
+
+    rp = sub.add_parser("repl-capacity", help="the replica read capacity result table from a calibrated sweep")
+    rp.add_argument("path"); rp.add_argument("--run-id")
+    rp.add_argument("--targets", default="", help="X,Y in k/s for records that carry none (older runs)")
+    rp.set_defaults(fn=cmd_repl_capacity)
     rs = sub.add_parser("repl-summary"); rs.add_argument("path", nargs="?", default="data/repl/results.jsonl")
     rs.add_argument("--run-id"); rs.add_argument("--sweep", action="store_true", help="read-client sweep view")
     rs.set_defaults(fn=cmd_repl_summary)

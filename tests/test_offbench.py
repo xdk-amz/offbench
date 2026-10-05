@@ -1117,7 +1117,7 @@ def test_repl_run_refuses_hosts_leased_elsewhere(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("KIRO_SESSION_ID", "offbench-test")
     t0 = time.time()
     rc = cli.main(["repl-run", "--primary", "p", "--replica", "r", "--gen", "g", "--bins", "a=" + "0" * 40,
-                   "--out", str(tmp_path / "o.jsonl")])
+                   "--key", "/k.pem", "--known-hosts", "/kh", "--out", str(tmp_path / "o.jsonl")])
     assert rc == 2 and time.time() - t0 < 10  # refused before any ssh to the unroutable test address
     assert "held by another session" in capsys.readouterr().err
     assert set(json.loads(path.read_text())["leases"]) == {"r"}
@@ -1128,3 +1128,249 @@ def test_cli_imports_without_the_lease_module():
     r = subprocess.run([sys.executable, "-c", "import sys, offbench.cli; print('offbench.lease' in sys.modules)"],
                        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and r.stdout.strip() == "False", r.stderr
+
+
+# ---- replica read capacity: calibration, report, preflight -------------------
+
+def test_repl_run_and_calibrate_require_the_ssh_key(capsys, monkeypatch):
+    monkeypatch.delenv("OFFBENCH_KEY", raising=False)
+    monkeypatch.delenv("OFFBENCH_KNOWN_HOSTS", raising=False)
+    assert cli.main(["repl-run", "--primary", "p", "--replica", "r", "--gen", "g", "--bins", "a=1"]) == 2
+    assert "pass --key and --known-hosts, or set OFFBENCH_KEY" in capsys.readouterr().err
+    assert cli.main(["repl-calibrate", "--primary", "p", "--replica", "r", "--gen", "g", "--bins", "a=1",
+                     "--iot", "4", "--out", "x.jsonl"]) == 2
+    assert "repl-calibrate needs the ssh key" in capsys.readouterr().err
+
+
+def test_repl_run_calibration_owns_builds_and_must_have_converged(tmp_path, capsys):
+    cal = {"id": "cal-1", "converged": False, "hosts": {"primary": "p", "replica": "r", "gen": "g"},
+           "builds": {"a": {"converged": False}}, "bins": {"a": "1"}, "iot": 4,
+           "targets": {"write_kcmd_s": 1.0, "read_kcmd_s": 1.0}}
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps(cal))
+    base = ["repl-run", "--calibration", str(path), "--key", "/k", "--known-hosts", "/kh"]
+    assert cli.main(base + ["--bins", "a=1"]) == 2
+    assert "drop --bins" in capsys.readouterr().err
+    assert cli.main(base) == 2
+    assert "did not converge for a" in capsys.readouterr().err
+    import argparse
+    a = argparse.Namespace(primary="x", replica=None, gen=None, reader_gen="")
+    assert "differs from the calibration's p" in cli._repl_names(a, cal)
+
+
+def test_repl_bin_carries_its_own_primary_load():
+    from offbench import repl
+    c = repl.ReplCell(16, 400, 4, write_conns=24, write_pipeline=16, p_conns=25)
+    b = repl.ReplBin("rr", "1", write_conns=18, write_pipeline=4, p_conns=13, p_pipeline=8)
+    got = b.cell_for(c)
+    assert (got.w_conns, got.w_pipeline, got.p_conns, got.pp_pipeline, got.pipeline) == (18, 4, 13, 8, 16)
+    assert got.key() == "w18xP4-r400xP16-p13xP8-iot4"
+    assert c.key() == "w24xP16-r400xP16-p25xP16-iot4"
+    assert got.threads("writer", True) == 16 and got.threads("preader", True) == 13
+    assert got.threads("reader", True) == 79 and repl.ReplCell(16, 50, 4).threads("reader") == 40
+    s = repl.ReplBin("custom", "2", share=1).cell_for(c)
+    assert (s.io_threads, s.cores) == (5, 4)
+
+
+def _rec_with(**over):
+    """A valid build_record() rep (2M writes/s, 5M replica reads/s), then fields overridden."""
+    from offbench import repl
+    from offbench.cell import CLK_TCK
+    pa = {"total_commands_processed": "0", "cmdstat_set": "calls=0,usec=1", "master_repl_offset": "10000000",
+          "sync_full": "1", "connected_clients": "2400", "used_active_time_main_thread": "0"}
+    pb = dict(pa, total_commands_processed="18000000", cmdstat_set="calls=12000000,usec=1",
+              used_active_time_main_thread="6.0", master_repl_offset="600000000")
+    ra = {"total_commands_processed": "0", "cmdstat_set": "calls=0", "master_link_status": "up",
+          "master_sync_in_progress": "0", "connected_clients": "2400", "slave_repl_offset": "0"}
+    rb = dict(ra, total_commands_processed="42000000", cmdstat_set="calls=12000000", slave_repl_offset="590000000")
+    z = {k: 0 for k in repl.ALLOWANCE_FIELDS}
+    gm = {"a": {"gt": 0.0, "gen_ticks": {"writer": 0, "reader": 0}, "ena": z},
+          "b": {"gt": 6.0, "gen_ticks": {"writer": 0, "reader": 0}, "ena": z}}
+    gens = {g: {"alive_at_stop": True, "timeouts": 0, "err_pct": 0.0, "latency": None} for g in ("writer", "reader")}
+    gens["writer"].update(over.pop("writer", {}))
+    roles = {k: repl.Role(k, "", "") for k in ("primary", "replica", "gen")}
+    rec = repl.build_record(repl.ReplCell(1, 2400, 2), repl.ReplBin("a", "1"), 1, roles,
+                            {"a": _snap(0.0, pa), "b": _snap(6.0, pb, main=6 * CLK_TCK)},
+                            {"a": _snap(0.0, ra), "b": _snap(6.0, rb)}, gm, gens,
+                            {"primary": {"asserts": 0}, "replica": {"asserts": 0}}, 6, "r")
+    rec.update(over)
+    return repl.revalidate(rec)
+
+
+def test_repl_generator_errors_and_target_drift_invalidate():
+    rec = _rec_with()
+    assert rec["valid"], rec["invalid"]
+    assert (rec["primary"]["write_kcmd_s"], rec["primary"]["read_kcmd_s"]) == (2000.0, 1000.0)
+    assert _rec_with(writer={"err_pct": 0.5})["invalid"] == ["writer reported 0.5% errors"]
+    ok = _rec_with(targets={"write_kcmd_s": 1900.0, "read_kcmd_s": 1060.0, "tol": 0.07})
+    assert ok["valid"], ok["invalid"]
+    bad = _rec_with(targets={"write_kcmd_s": 2200.0, "read_kcmd_s": 1000.0})
+    assert bad["invalid"] == ["primary writes 2000k/s, -9.1% off target 2200k/s"]
+
+
+def test_repl_preflight_names_what_each_host_lacks(monkeypatch):
+    from offbench import repl
+    local = repl.code_hashes()
+    replies = {
+        "p": {"code": local, "cli": True, "cachecannon": False, "missing_servers": [], "pintune": True},
+        "r": {"code": dict(local, **{"repl.py": "old"}), "cli": False, "cachecannon": False,
+              "missing_servers": ["/home/u/offbench/builds/2/src/valkey-server"],
+              "pintune": "pinned cell without pintune: irqbalance=active"},
+        "g": {"code": local, "cli": False, "cachecannon": False, "missing_servers": []},
+        "x": None,
+    }
+    sent = []
+
+    class FakeSsh:
+        def start(self, role, payload):
+            sent.append((role.name, payload))
+
+            def wait(timeout=0):
+                if replies[role.name] is None:
+                    raise repl.CellError(f"{role.name} preflight: CellError: unknown action preflight")
+                return replies[role.name]
+            return wait
+    roles = {"primary": repl.Role("p", "", ""), "replica": repl.Role("r", "", ""),
+             "gen": repl.Role("g", "", ""), "rgen": repl.Role("x", "", "")}
+    got = repl.preflight(FakeSsh(), roles, [repl.ReplBin("a", "1"), repl.ReplBin("b", "2")])
+    assert got[0] == f"r: ~/offbench-src differs from this checkout in repl.py; {repl.SYNC_HINT}"
+    assert got[1:4] == ["r: no build at /home/u/offbench/builds/2/src/valkey-server",
+                        "r: no valkey-cli at ~/base/src/valkey-cli", "r: pinned cell without pintune: irqbalance=active"]
+    assert got[4] == "g: cachecannon not built at ~/offbench-src/vendor/cachecannon/target/release"
+    assert got[5].startswith("x: host offbench predates preflight")
+    assert len(got) == 6
+    by = dict(sent)
+    assert by["p"]["servers"] == ["~/offbench/builds/1/src/valkey-server", "~/offbench/builds/2/src/valkey-server"]
+    assert by["g"]["servers"] == [] and by["p"]["pintune"] and not by["g"]["pintune"]
+
+
+def _sim_primary(rtt_w, rtt_r, sw, sr):
+    """Closed-loop primary: writes and reads share one server queue. Rates in k/s for (fw, fp) in flight."""
+    def rates(fw, fp):
+        def busy(d):
+            return fw * sw / (rtt_w + sw + d) + fp * sr / (rtt_r + sr + d)
+        lo, hi = 0.0, 1.0
+        if busy(0.0) > 1:
+            for _ in range(80):
+                mid = (lo + hi) / 2
+                lo, hi = (mid, hi) if busy(mid) > 1 else (lo, mid)
+        d = hi if busy(0.0) > 1 else 0.0
+        return fw / (rtt_w + sw + d) / 1000, fp / (rtt_r + sr + d) / 1000
+    return rates
+
+
+def test_replcap_calibration_matches_each_simulated_build_to_x_and_y():
+    import random
+    from offbench import replcap
+    sims = {"stock": _sim_primary(100e-6, 100e-6, 1 / 2.0e6, 1 / 2.0e6),
+            "rr": _sim_primary(100e-6, 100e-6, 1 / 1.4e6, 1 / 12e6),
+            "custom": _sim_primary(500e-6, 100e-6, 1 / 1.5e6, 1 / 6e6)}
+    noise = random.Random(7)
+    calls = []
+
+    def measure(shapes, reps, phase):
+        calls.append((phase, dict(shapes), reps))
+        out = {}
+        for b, s in shapes.items():
+            out[b] = []
+            for _ in range(reps):
+                w, r = sims[b](s.fw, s.fp)
+                out[b].append({"valid": True, "primary": {"write_kcmd_s": w * (1 + noise.gauss(0, 0.01)),
+                                                          "read_kcmd_s": r * (1 + noise.gauss(0, 0.01))}})
+        return out
+    ref = replcap.Shape(24, 16, 25, 16)
+    builds = list(sims)
+    r0 = replcap.reference(measure, builds, ref, 3)
+    x, y = r0["targets"]["write_kcmd_s"], r0["targets"]["read_kcmd_s"]
+    assert x == min(v["write_kcmd_s"] for v in r0["builds"].values())
+    seed = {b: [(ref, v["write_kcmd_s"], v["read_kcmd_s"])] for b, v in r0["builds"].items()}
+    res = replcap.calibrate(measure, builds, x, y, {b: ref for b in builds}, seed=seed, log=lambda m: None)
+    assert res["converged"], res["builds"]
+    for b, v in res["builds"].items():
+        assert v["off"] <= replcap.CAL_TOL and v["probes"] <= 8, (b, v)
+    # rr carries X and Y with a handful of connections at P16, so its pipelines drop for finer steps
+    s = replcap.Shape(**res["builds"]["rr"]["shape"])
+    assert s.wp < 16 and s.w >= replcap.MIN_CONNS
+    assert [c[0] for c in calls].count("confirm") == 1 and calls[0][0] == "reference"
+    assert all(c[2] == 1 for c in calls if c[0] == "probe")
+
+
+def test_replcap_next_x_brackets_and_bisects_on_a_plateau():
+    from offbench import replcap
+    assert replcap.next_x([(10, 50.0)], 100.0) == 20          # extrapolate, at most doubling
+    assert replcap.next_x([(10, 90.0)], 99.0) == 11.0
+    # bracket (0, 0)..(784, 1927): interpolation lands at 720, outside the middle half, so bisect
+    assert replcap.next_x([(784, 1927.0)], 1770.0) == 392.0
+    assert replcap.next_x([(196, 1600.0), (392, 1870.0), (784, 1927.0)], 1770.0) == 196 + 170 * 196 / 270
+
+
+def _cap(build, readers, read, state="ok", cores=None, threads=79, rtt=0.05, w=800.0, r=1000.0, shape=(7, 9)):
+    from offbench import repl
+    inv = {"ok": [], "behind": [f"{repl.LAGGING}: applied 80% of primary writes, lag +9.0 MB/s"],
+           "bad": ["primary asserted"]}[state]
+    return {"kind": "replrw", "schema": 1, "bin": {"name": build}, "rep": 1, "hosts": {"rgen": "x"},
+            "cell": {"conns": readers, "pipeline": 16, "io_threads": 4, "pin_share": 0, "write_conns": shape[0],
+                     "p_conns": shape[1], "write_pipeline": 16, "p_pipeline": 16},
+            "primary": {"write_kcmd_s": w, "read_kcmd_s": r}, "replica": {"read_kcmd_s": read},
+            "reader": {"cores": cores, "threads": threads, "latency": {"p99_us": 500}} if readers else None,
+            "rtt_ms": {"gen_replica": {"min_ms": rtt}}, "valid": state == "ok", "invalid": inv}
+
+
+def test_replcap_report_outcomes_and_flags():
+    from offbench import replcap
+    recs = []
+    for n, z in ((0, 0), (50, 5000), (100, 5800), (200, 6400), (400, 6700), (800, 6800)):
+        recs += [_cap("custom", n, z, rtt=0.1) for _ in range(3)]
+    recs += [_cap("stock", 0, 0)] * 3 + [_cap("stock", 50, 2260)] * 3
+    recs += [_cap("stock", n, 2500, "behind") for n in (100, 200) for _ in range(3)]
+    recs += [_cap("rr", 50, 6450)] * 3 + [_cap("rr", 100, 6630)] * 3
+    recs += [_cap("rr", 200, 6500), _cap("rr", 200, 6600, "behind"), _cap("rr", 200, 6600, "behind")]
+    recs += [_cap("rr", 400, 6560)] * 2 + [_cap("rr", 400, 6700, "behind")] + [_cap("rr", 800, 6430)] * 3
+    recs += [_cap("wide", 400, 5000)] * 3 + [_cap("wide", 800, 6000)] * 3
+    recs += [_cap("gen", 400, 15000, cores=30)] * 3 + [_cap("gen", 800, 22000, cores=76)] * 3
+    recs += [_cap("custom", 0, 0, shape=(24, 25))] * 3   # a reference probe in the same file
+    out = replcap.report(recs, targets=(782.0, 988.0))
+    lines = out.splitlines()
+    top = lines.index("| build | X writes/s | Y reads/s | replica reads/s in sync | more offered reads |")
+    table = lines[top + 2:lines.index("", top)]
+    rows = {line.split(" | ")[0][2:]: line for line in table}
+    assert "| 6.80M at 800 readers | in sync at every step; reads level off |" in rows["custom"]
+    assert "| at least 2.26M at 50 readers | falls out of sync between 50 and 100 readers |" in rows["stock"]
+    assert ("| 6.63M at 100 readers | unstable: out of sync at 200 (2/3 fell behind), in sync at 400, 800 |"
+            in rows["rr"])
+    assert "| at least 6.00M at 800 readers | in sync at every step; reads still rising" in rows["wide"]
+    assert "| at least 22.00M at 800 readers | not reached:" in rows["gen"]
+    raw = out.splitlines()
+    assert any(l.startswith("| custom 7/9 | 0 | 3/3 |") for l in raw)
+    assert any(l.startswith("| custom | 50 | 3/3 |") and l.endswith("| RTT |") for l in raw)
+    assert any(l.startswith("| custom | 100 | 3/3 |") and l.endswith("|  |") for l in raw)
+    assert any(l.startswith("| stock | 100 | 0/3 |") and l.endswith("invalid, fell behind 3/3 |") for l in raw)
+    assert any(l.startswith("| rr | 400 | 2/3 |") and l.endswith("1 rep fell behind |") for l in raw)
+    assert any(l.startswith("| gen | 800 |") and "GEN" in l for l in raw)
+    assert "3 records with other primary loads" in out
+    assert "targets: X 782k writes/s, Y 988k reads/s" in out
+
+
+def test_sweep_summary_needs_a_majority_and_keeps_primary_loads_apart():
+    from offbench import repl
+    recs = [_rec_with() for _ in range(3)]
+    recs[1] = _rec_with(targets={"write_kcmd_s": 3000.0, "read_kcmd_s": 1000.0})
+    recs[2] = _rec_with(targets={"write_kcmd_s": 3000.0, "read_kcmd_s": 1000.0})
+    out = repl.sweep_summary(recs)
+    assert "1/3  INVALID: primary writes 2000k/s" in out
+    other = _rec_with()
+    other["cell"] = dict(other["cell"], write_conns=99)
+    out = repl.sweep_summary([recs[0], other])
+    assert out.count("1/1") == 2
+
+
+def test_deploy_source_only_rsyncs_and_nothing_else():
+    host = hosts.Host(name="metal-2", ssh="ec2-user@10.0.0.2")
+    calls = []
+
+    def run(cmd):
+        calls.append(cmd)
+        return _subprocess.CompletedProcess(cmd, 0, "", "")
+    res = _deploy.sync_source(host, _deploy.SshConfig(key="id.pem", known_hosts="kh"), _OFFBENCH_ROOT, runner=run)
+    assert res.ok and [c[0] for c in calls] == ["rsync"]
+    assert calls[0][-1] == "ec2-user@10.0.0.2:~/offbench-src"

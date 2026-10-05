@@ -269,3 +269,16 @@ def deploy_hosts(
 ) -> list[HostDeployResult]:
     """Deploy to each host in turn (serial: they may share a binary/port)."""
     return [deploy_host(h, cfg, package_dir, runner=runner) for h in hosts]
+
+
+def sync_source(host: Host, cfg: SshConfig, package_dir: Path, runner=_default_runner) -> HostDeployResult:
+    """Only the rsync step: the code repl-run's host side runs, without a valkey clone or a worker, so the
+    host does not look busy afterwards."""
+    res = HostDeployResult(host=host.name, ok=False)
+    cp = _run(rsync_cmd(cfg, host, package_dir, cfg.src_dest), runner)
+    if cp.returncode != 0:
+        res.error = f"rsync source failed: {(cp.stderr or cp.stdout).strip()}"
+        return res
+    res.steps.append(f"synced source -> {cfg.src_dest}")
+    res.ok = True
+    return res
