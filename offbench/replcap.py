@@ -168,7 +168,7 @@ def calibrate(measure: Measure, builds: list[str], x: float, y: float, start: di
     chosen: dict = {}
     retried: set = set()
 
-    def search(todo: set) -> None:
+    def search(todo: list) -> None:
         cur = {}
         for b in todo:
             bp = best(points[b], x, y)
@@ -207,16 +207,16 @@ def calibrate(measure: Measure, builds: list[str], x: float, y: float, start: di
                 bp = best(points[b], x, y)
                 chosen[b] = bp[0] if bp else None
 
-    todo = set(builds)
+    todo = list(builds)
     result: dict = {}
     for rnd in range(CONFIRM_ROUNDS):
         search(todo)
-        missing = sorted(b for b in todo if chosen.get(b) is None)
+        missing = [b for b in todo if chosen.get(b) is None]
         if missing:
             raise repl.CellError(f"no valid calibration probe for {', '.join(missing)}")
         recs = measure({b: chosen[b] for b in todo}, confirm_reps, "confirm")
-        retry = set()
-        for b in sorted(todo):
+        retry = []
+        for b in todo:
             v = [r for r in recs.get(b, []) if r.get("valid")]
             for r in v:
                 points[b].append((chosen[b], *delivered(r)))
@@ -229,7 +229,7 @@ def calibrate(measure: Measure, builds: list[str], x: float, y: float, start: di
             log(f"{b}: confirm {chosen[b].label()}: {w:.0f}k writes {w / x - 1:+.1%}, {r_:.0f}k reads "
                 f"{r_ / y - 1:+.1%} ({len(v)}/{confirm_reps} valid)")
             if not result[b]["converged"]:
-                retry.add(b)
+                retry.append(b)
                 del chosen[b]
         if not retry:
             break

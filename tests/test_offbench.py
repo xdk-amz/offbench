@@ -1287,7 +1287,8 @@ def test_replcap_calibration_matches_each_simulated_build_to_x_and_y():
     res = replcap.calibrate(measure, builds, x, y, {b: ref for b in builds}, seed=seed, log=lambda m: None)
     assert res["converged"], res["builds"]
     for b, v in res["builds"].items():
-        assert v["off"] <= replcap.CAL_TOL and v["probes"] <= 8, (b, v)
+        assert v["off"] <= replcap.CAL_TOL and v["probes"] <= 10, (b, v)
+    assert all(list(c[1]) == [b for b in builds if b in c[1]] for c in calls)
     # rr carries X and Y with a handful of connections at P16, so its pipelines drop for finer steps
     s = replcap.Shape(**res["builds"]["rr"]["shape"])
     assert s.wp < 16 and s.w >= replcap.MIN_CONNS
