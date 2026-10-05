@@ -163,6 +163,7 @@ INFO_KEEP = {
     "master_link_status", "master_sync_in_progress", "master_repl_offset", "slave_repl_offset",
     "sync_full", "sync_partial_ok", "connected_slaves", "mem_clients_slaves", "fastpath_batches",
     "master_last_io_seconds_ago", "used_memory", "instantaneous_ops_per_sec",
+    "io_threaded_primary_drain_jobs", "io_threaded_primary_drain_bytes",
 }
 
 
@@ -487,6 +488,10 @@ def server_metrics(m: dict) -> dict:
         "slave0": b["info"].get("slave0"),
         "mem_clients_slaves_b": int(b["info"].get("mem_clients_slaves") or 0),
         "fastpath_batches_delta": _delta(a, b, "fastpath_batches") if b["info"].get("fastpath_batches") else None,
+        "primary_drain_jobs_delta": (_delta(a, b, "io_threaded_primary_drain_jobs")
+                                     if b["info"].get("io_threaded_primary_drain_jobs") else None),
+        "primary_drain_bytes_delta": (_delta(a, b, "io_threaded_primary_drain_bytes")
+                                      if b["info"].get("io_threaded_primary_drain_bytes") else None),
         "ena": {k: b["ena"][k] - a["ena"][k] for k in ALLOWANCE_FIELDS},
     }
 
