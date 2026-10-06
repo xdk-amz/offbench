@@ -146,6 +146,22 @@ def apart(points: list) -> bool:
     return False
 
 
+def _toward(n: int, cur: int, ratio: float, aim: float) -> int:
+    """A role's next connection count, moved only toward its own target from cur, whose rate is ratio x the
+    target: down when above it, up when below (by at least one connection), anywhere when within aim."""
+    if ratio > 1 + aim:
+        return max(1, min(n, cur - 1))
+    if ratio < 1 - aim:
+        return max(n, cur + 1)
+    return n
+
+
+def _miss2(t: tuple, x: float, y: float) -> float:
+    """Squared log misses of a (shape, writes, reads) point against (X, Y): the search steps from the point
+    where this is smallest, which weighs both roles, where off() would pick a point on its worse role alone."""
+    return math.log(max(t[1], 1e-9) / x) ** 2 + math.log(max(t[2], 1e-9) / y) ** 2
+
+
 def propose(points: list, x: float, y: float, aim: float = AIM * CAL_TOL) -> Optional[Shape]:
     """Next shape to measure for one build, or None when no untried shape is left near the target.
 
@@ -157,10 +173,12 @@ def propose(points: list, x: float, y: float, aim: float = AIM * CAL_TOL) -> Opt
     Otherwise both share a thread, and moving one moves the other: the total in flight is searched against
     X + Y, the split comes from the closest point so far (writes/reads there is k x writes in flight / reads
     in flight, and the split is set so k x split = X/Y), and each role moves only toward its own target, so a
-    role above it gets no more connections than at the closest point and one below no fewer.
+    role above it loses at least a connection and one below gains at least one. The closest point is the one
+    with the smallest squared log misses, which weighs both roles: k measured there holds at about the load
+    the target needs, where at a heavier, saturated point it does not.
     """
     pts = _merged(points)
-    s, w, r = min(pts, key=lambda t: off(t[1], t[2], x, y))
+    s, w, r = min(pts, key=lambda t: _miss2(t, x, y))
     tried = {t[0] for t in pts}
     if r > 0 and w > 0:
         if apart(pts):
@@ -171,17 +189,18 @@ def propose(points: list, x: float, y: float, aim: float = AIM * CAL_TOL) -> Opt
             q = (x / y) / k
             n = next_x([(t[0].fw + t[0].fp, t[1] + t[2]) for t in pts], x + y)
             cw, cp = max(1, round(n * q / (1 + q) / s.wp)), max(1, round(n / (1 + q) / s.pp))
-            cw = min(cw, s.w) if w > x * (1 + aim) else max(cw, s.w) if w < x * (1 - aim) else cw
-            cp = min(cp, s.p) if r > y * (1 + aim) else max(cp, s.p) if r < y * (1 - aim) else cp
+            cw = _toward(cw, s.w, w / x, aim)
+            cp = _toward(cp, s.p, r / y, aim)
         cand = replace(s, w=cw, p=cp)
         if cand not in tried:
             return cand
     # Rounded onto a shape already measured: from the closest point, step the count whose rate is further
-    # off by one connection toward its target.
+    # off by one connection toward its target, then the other, then both.
     dw, dr = w / x - 1, r / y - 1
-    for _, which, d in sorted([(abs(dw), "w", -1 if dw > 0 else 1), (abs(dr), "p", -1 if dr > 0 else 1)],
-                              reverse=True):
-        c = replace(s, w=s.w + d) if which == "w" else replace(s, p=s.p + d)
+    sw, sp = -1 if dw > 0 else 1, -1 if dr > 0 else 1
+    steps = [c for _, c in sorted([(abs(dw), (sw, 0)), (abs(dr), (0, sp))], reverse=True)] + [(sw, sp)]
+    for a, b in steps:
+        c = replace(s, w=s.w + a, p=s.p + b)
         if c.w >= 1 and c.p >= 1 and c not in tried:
             return c
     return None

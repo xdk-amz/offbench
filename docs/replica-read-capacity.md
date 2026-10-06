@@ -78,12 +78,12 @@ python3 ~/.kiro/crew/skills/hosts/hosts.py release metal-2,metal-7,metal-8,metal
      median reads/s among the builds, so every build's primary can carry both at these depths. `--targets X,Y`
      (k/s) skips this.
    - Search: per build, one-rep probes with no replica readers, until the primary delivers X and Y within 3%.
-     Where writes and reads share a thread, moving one moves the other: the total requests in flight are
-     searched against X + Y and the writer/reader split against X/Y, and a role above its target never gets
-     more connections, nor one below fewer. Where they queue apart (one role's latency at some probe is 3x
-     the other's, as when rr's SET path is at its limit while its IO threads serve the reads), each role is
-     searched against its own target, and a role whose rate stays flat as its connections fall is halved
-     down that plateau. At most 12 probes per build.
+     Where writes and reads share a thread, moving one moves the other: from the probe closest on both roles,
+     the total requests in flight are searched against X + Y and the writer/reader split against X/Y, and a
+     role above its target loses connections while one below gains them. Where they queue apart (one role's
+     latency at some probe is 3x the other's, as when rr's SET path is at its limit while its IO threads serve
+     the reads), each role is searched against its own target, and a role whose rate stays flat as its
+     connections fall is halved down that plateau. At most 12 probes per build.
    - Confirm: 3 interleaved reps per build at its chosen load. The median must be within 5% of X and Y, or
      the build is searched again (3 rounds at most).
    - Output: the records in `<name>-calib.jsonl`, a `.log` beside them, and the calibration in

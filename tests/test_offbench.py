@@ -1355,9 +1355,23 @@ def test_replcap_calibration_names_a_coarse_step():
     rr = res["builds"]["rr"]
     s = replcap.Shape(**rr["shape"])
     assert rr["coarse"] and s.w < replcap.MIN_CONNS
-    d = res["suggest"]["write_pipeline"]
+    d = rr["coarse"]["write_pipeline"]
     assert d < 16 and s.fw / d >= replcap.MIN_CONNS and s.fw / (2 * d) < replcap.MIN_CONNS
+    # every build shares the depths, so the run's suggestion is the lowest any build needs
+    assert res["suggest"]["write_pipeline"] == min(v["coarse"]["write_pipeline"] for v in res["builds"].values()
+                                                   if "write_pipeline" in v["coarse"])
     assert any("rr:" in m and "coarse step" in m and f"--write-pipeline {d}" in m for m in logs)
+
+
+def test_replcap_steps_from_the_point_closest_on_both_roles():
+    """rr at 2 cores, P4 writers and P16 primary readers (2026-10-06): its reference is 7.7% over on both roles,
+    every lighter probe is far over on one. The search must step from (15, 8), not back next to the reference."""
+    from offbench import replcap
+    pts = [(replcap.Shape(w, 4, p, 16), W, R) for w, p, W, R in
+           [(48, 25, 420, 1427), (24, 13, 390, 1463), (12, 6, 449, 1185), (17, 9, 438, 1334), (15, 8, 426, 1301),
+            (13, 7, 433, 1256), (47, 25, 408, 1449), (48, 24, 435, 1381)]]
+    s = replcap.propose(pts, 390.0, 1327.0)
+    assert s.wp == 4 and s.pp == 16 and s.w <= 16 and 7 <= s.p <= 9, s
 
 
 def test_replcap_ref_shape_keeps_requests_in_flight_at_any_depth():
