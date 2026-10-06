@@ -71,7 +71,8 @@ python3 ~/.kiro/crew/skills/hosts/hosts.py release metal-2,metal-7,metal-8,metal
      which the build needing the fewest requests in flight still gets 10 or more connections of each, since
      one connection is then a step of 10% or less. A build that ends below 10 is named in the log with the
      depth that would fix it, and a calibration that did not converge prints the depths to rerun with. Depths
-     used so far: 2 cores P4 writers and P16 primary readers, 8 cores P8 and P2.
+     used so far: 2 cores P4 writers and P16 primary readers, 8 cores P8 and P2. At 2 cores stock's writers
+     and readers and rr's readers ended at 8 connections, and the calibration suggests P2 and P8 instead.
    - Reference: every build at the same load, 6 writer connections per core and 25 primary reader
      connections at depth 16, held at the same requests in flight at other depths (96 x `<C>` / `<WP>`
      writers, 400 / `<PP>` readers), 3 interleaved reps. X is the lowest median writes/s and Y the lowest
