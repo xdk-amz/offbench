@@ -58,25 +58,39 @@ python3 ~/.kiro/crew/skills/hosts/hosts.py release metal-2,metal-7,metal-8,metal
    python3 -m offbench deploy --source-only --hosts metal-2,metal-7,metal-8,metal-4
    ```
 
-2. Calibrate X, Y and each build's primary load (about 12 min at 4 cores). `<C>` is the cores per server:
+2. Calibrate X, Y and each build's primary load (about 12 min at 4 cores). `<C>` is the cores per server, and
+   `<WP>` and `<PP>` the writers' and primary readers' pipeline depths:
 
    ```
-   python3 -m offbench repl-calibrate $H --bins "$B" --share-bins custom --iot <C> --out data/repl/<name>-calib.jsonl
+   python3 -m offbench repl-calibrate $H --bins "$B" --share-bins custom --iot <C> \
+       --write-pipeline <WP> --p-pipeline <PP> --out data/repl/<name>-calib.jsonl
    ```
 
-   - Reference: every build at 6 writer connections per core and 25 primary reader connections, all P16,
-     3 interleaved reps. X is the lowest median writes/s and Y the lowest median reads/s among the builds,
-     so every build's primary can carry both. `--targets X,Y` (k/s) skips this.
-   - Search: per build, one-rep probes with no replica readers. Requests in flight are adjusted until the
-     primary delivers X and Y within 3%: the total against X + Y, the writer/reader split against X/Y. A
-     generator below 10 connections has its pipeline depth halved until it has 10 (or reaches P1), for finer
-     steps, and keeps that depth for the rest of the search. At most 12 probes per build.
+   - Depths: every build's writers run at `<WP>` and its primary readers at `<PP>` (default 16 for both), in
+     the reference and in every probe; calibration changes connection counts only. Pick the largest depths at
+     which the build needing the fewest requests in flight still gets 10 or more connections of each, since
+     one connection is then a step of 10% or less. A build that ends below 10 is named in the log with the
+     depth that would fix it, and a calibration that did not converge prints the depths to rerun with. Depths
+     used so far: 2 cores P4 writers and P16 primary readers, 8 cores P8 and P2.
+   - Reference: every build at the same load, 6 writer connections per core and 25 primary reader
+     connections at depth 16, held at the same requests in flight at other depths (96 x `<C>` / `<WP>`
+     writers, 400 / `<PP>` readers), 3 interleaved reps. X is the lowest median writes/s and Y the lowest
+     median reads/s among the builds, so every build's primary can carry both at these depths. `--targets X,Y`
+     (k/s) skips this.
+   - Search: per build, one-rep probes with no replica readers, until the primary delivers X and Y within 3%.
+     Where writes and reads share a thread, moving one moves the other: the total requests in flight are
+     searched against X + Y and the writer/reader split against X/Y, and a role above its target never gets
+     more connections, nor one below fewer. Where they queue apart (one role's latency at some probe is 3x
+     the other's, as when rr's SET path is at its limit while its IO threads serve the reads), each role is
+     searched against its own target, and a role whose rate stays flat as its connections fall is halved
+     down that plateau. At most 12 probes per build.
    - Confirm: 3 interleaved reps per build at its chosen load. The median must be within 5% of X and Y, or
      the build is searched again (3 rounds at most).
    - Output: the records in `<name>-calib.jsonl`, a `.log` beside them, and the calibration in
      `<name>-calib.json`: targets, hosts, builds, each build's `shape` (`w` writer and `p` primary reader
-     connections, `wp` and `pp` their pipelines), and under `points` every measurement per build, labelled
-     reference, probe or confirm. It exits 1 if a build did not converge, and `repl-run` refuses that
+     connections, `wp` and `pp` their pipelines) and `coarse` (roles under 10 connections, with the depth that
+     would give 10), `suggest` (those depths for the run), and under `points` every measurement per build,
+     labelled reference, probe or confirm. It exits 1 if a build did not converge, and `repl-run` refuses that
      calibration.
 
 3. Raise the replica's offered read load step by step (about 25 min at 4 cores, 54 reps; add 1600 from 8

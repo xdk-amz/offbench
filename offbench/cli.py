@@ -829,7 +829,7 @@ def _repl_calibrate(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
         return res
 
     builds = [b.name for b in bins]
-    ref_shape = replcap.Shape(a.ref_writers or 6 * cores, a.write_pipeline, a.ref_p_conns, a.p_pipeline)
+    ref_shape = replcap.ref_shape(cores, a.write_pipeline, a.p_pipeline, a.ref_writers, a.ref_p_conns)
     ref = None
     try:
         if a.targets:
@@ -860,6 +860,10 @@ def _repl_calibrate(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
         log(f"{b}: {s.label()} -> {v['write_kcmd_s']:.0f}k writes {v['write_kcmd_s'] / x - 1:+.1%}, "
             f"{v['read_kcmd_s']:.0f}k reads {v['read_kcmd_s'] / y - 1:+.1%}" + ("" if v["converged"] else "  NOT CONVERGED"))
     log(f"calibration written to {path}" + ("" if res["converged"] else " (not converged: repl-run will refuse it)"))
+    if not res["converged"] and res.get("suggest"):
+        d = {"write_pipeline": a.write_pipeline, "p_pipeline": a.p_pipeline, **res["suggest"]}
+        log(f"one connection was a coarse step: rerun with --write-pipeline {d['write_pipeline']} "
+            f"--p-pipeline {d['p_pipeline']} (the reference is measured again at those depths)")
     if res["converged"]:
         log(f"next: python3 -m offbench repl-run --calibration {path} --conns 0,50,100,200,400,800 --pipelines 16 "
             f"--reps 3 --out <sweep>.jsonl")
@@ -1069,11 +1073,15 @@ def main(argv=None) -> int:
     rc.add_argument("--bins", required=True, help="as repl-run")
     rc.add_argument("--share-bins", default="", help="as repl-run")
     rc.add_argument("--iot", type=int, required=True, help="cores per server (io-threads; --share-bins builds get one more)")
-    rc.add_argument("--write-pipeline", type=int, default=16, help="writer pipeline to start from")
-    rc.add_argument("--p-pipeline", type=int, default=16, help="primary reader pipeline to start from")
+    rc.add_argument("--write-pipeline", type=int, default=16,
+                    help="writers' pipeline depth, for every build in the reference and every probe")
+    rc.add_argument("--p-pipeline", type=int, default=16,
+                    help="primary readers' pipeline depth, for every build in the reference and every probe")
     rc.add_argument("--targets", default="", help="X,Y in k/s; default: the lowest writes and reads at the reference load")
-    rc.add_argument("--ref-writers", type=int, default=0, help="reference writer connections (default 6 per core)")
-    rc.add_argument("--ref-p-conns", type=int, default=25, help="reference primary reader connections")
+    rc.add_argument("--ref-writers", type=int, default=0,
+                    help="reference writer connections (default 96 per core / --write-pipeline: 6 per core at P16)")
+    rc.add_argument("--ref-p-conns", type=int, default=0,
+                    help="reference primary reader connections (default 400 / --p-pipeline: 25 at P16)")
     rc.add_argument("--ref-reps", type=int, default=3)
     rc.add_argument("--tol", type=float, default=0.05, help="accept a build within this of X and Y")
     rc.add_argument("--max-probes", type=int, default=12, help="one-rep probes per build")

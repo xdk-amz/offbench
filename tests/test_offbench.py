@@ -1259,15 +1259,13 @@ def _sim_primary(rtt_w, rtt_r, sw, sr):
     return rates
 
 
-def test_replcap_calibration_matches_each_simulated_build_to_x_and_y():
-    import random
-    from offbench import replcap
-    sims = {"stock": _sim_primary(100e-6, 100e-6, 1 / 2.0e6, 1 / 2.0e6),
-            "rr": _sim_primary(100e-6, 100e-6, 1 / 1.4e6, 1 / 12e6),
-            "custom": _sim_primary(500e-6, 100e-6, 1 / 1.5e6, 1 / 6e6)}
-    noise = random.Random(7)
-    calls = []
+def _sim_split(rtt_w, rtt_r, sw, sr):
+    """Writes and reads each on their own server, so one role saturates alone (rr's SET path on main)."""
+    wq, rq = _sim_primary(rtt_w, rtt_r, sw, 0.0), _sim_primary(rtt_w, rtt_r, 0.0, sr)
+    return lambda fw, fp: (wq(fw, 0)[0], rq(0, fp)[1])
 
+
+def _sim_measure(sims, noise, calls):
     def measure(shapes, reps, phase):
         calls.append((phase, dict(shapes), reps))
         out = {}
@@ -1278,20 +1276,39 @@ def test_replcap_calibration_matches_each_simulated_build_to_x_and_y():
                 out[b].append({"valid": True, "primary": {"write_kcmd_s": w * (1 + noise.gauss(0, 0.01)),
                                                           "read_kcmd_s": r * (1 + noise.gauss(0, 0.01))}})
         return out
-    ref = replcap.Shape(24, 16, 25, 16)
+    return measure
+
+
+def _sim_calibrate(sims, ref, seed=7, **kw):
+    import random
+    from offbench import replcap
+    calls = []
+    measure = _sim_measure(sims, random.Random(seed), calls)
     builds = list(sims)
     r0 = replcap.reference(measure, builds, ref, 3)
     x, y = r0["targets"]["write_kcmd_s"], r0["targets"]["read_kcmd_s"]
     assert x == min(v["write_kcmd_s"] for v in r0["builds"].values())
-    seed = {b: [(ref, v["write_kcmd_s"], v["read_kcmd_s"])] for b, v in r0["builds"].items()}
-    res = replcap.calibrate(measure, builds, x, y, {b: ref for b in builds}, seed=seed, log=lambda m: None)
+    seed_pts = {b: [(ref, v["write_kcmd_s"], v["read_kcmd_s"])] for b, v in r0["builds"].items()}
+    logs = []
+    res = replcap.calibrate(measure, builds, x, y, {b: ref for b in builds}, seed=seed_pts, log=logs.append, **kw)
+    return res, calls, (x, y), logs
+
+
+def test_replcap_calibration_matches_each_simulated_build_to_x_and_y():
+    from offbench import replcap
+    sims = {"stock": _sim_primary(100e-6, 100e-6, 1 / 2.0e6, 1 / 2.0e6),
+            "rr": _sim_primary(100e-6, 100e-6, 1 / 1.4e6, 1 / 12e6),
+            "custom": _sim_primary(500e-6, 100e-6, 1 / 1.5e6, 1 / 6e6)}
+    builds = list(sims)
+    ref = replcap.ref_shape(4, 4, 4)
+    res, calls, _, _ = _sim_calibrate(sims, ref)
     assert res["converged"], res["builds"]
     for b, v in res["builds"].items():
-        assert v["off"] <= replcap.CAL_TOL and v["probes"] <= 10, (b, v)
+        assert v["off"] <= replcap.CAL_TOL and v["probes"] <= 10 and not v["coarse"], (b, v)
+    assert res["suggest"] == {}
     assert all(list(c[1]) == [b for b in builds if b in c[1]] for c in calls)
-    # rr carries X and Y with a handful of connections at P16, so its pipelines drop for finer steps
-    s = replcap.Shape(**res["builds"]["rr"]["shape"])
-    assert s.wp < 16 and s.w >= replcap.MIN_CONNS
+    # every build keeps the run's depths; only connection counts move
+    assert {(s.wp, s.pp) for c in calls for s in c[1].values()} == {(4, 4)}
     assert [c[0] for c in calls].count("confirm") == 1 and calls[0][0] == "reference"
     assert all(c[2] == 1 for c in calls if c[0] == "probe")
     for b in builds:
@@ -1301,6 +1318,58 @@ def test_replcap_calibration_matches_each_simulated_build_to_x_and_y():
         assert [p["kind"] for p in pts[-3:]] == ["confirm"] * 3 and {p["kind"] for p in pts[1:-3]} <= {"probe"}
 
 
+def test_replcap_calibration_cuts_a_role_on_its_own_plateau():
+    """rr's writes saturate on their own (main's SET path) while its reads are cheap: the search must take
+    writers down while writes are above X, even when reads are below Y (the 8-core rr failure)."""
+    from offbench import replcap
+    sims = {"stock": _sim_primary(90e-6, 90e-6, 1 / 1.7e6, 1 / 1.7e6),
+            "rr": _sim_split(100e-6, 45e-6, 1 / 1.25e6, 1 / 7e6),
+            "custom": _sim_primary(300e-6, 150e-6, 1 / 1.1e6, 1 / 3e6)}
+    ref = replcap.ref_shape(8, 8, 2)
+    assert ref == replcap.Shape(96, 8, 200, 2)
+    res, calls, (x, y), _ = _sim_calibrate(sims, ref)
+    assert res["converged"], res["builds"]
+    assert {(s.wp, s.pp) for c in calls for s in c[1].values()} == {(8, 2)}
+    assert res["builds"]["rr"]["probes"] <= 10
+    # each role moves only toward its own target from the closest point so far
+    seen = []
+    for p in res["points"]["rr"]:
+        s = replcap.Shape(p["w"], p["wp"], p["p"], p["pp"])
+        if p["kind"] == "probe" and seen:
+            b, w, r = replcap.best(seen, x, y)
+            if w > x * (1 + replcap.AIM * replcap.CAL_TOL):
+                assert s.w <= b.w, (s, b, w)
+            if r < y * (1 - replcap.AIM * replcap.CAL_TOL):
+                assert s.p >= b.p, (s, b, r)
+        seen.append((s, p["write_kcmd_s"], p["read_kcmd_s"]))
+
+
+def test_replcap_calibration_names_a_coarse_step():
+    """At P16 rr carries X and Y with a handful of connections: calibration says so and names the depths."""
+    from offbench import replcap
+    sims = {"stock": _sim_primary(100e-6, 100e-6, 1 / 2.0e6, 1 / 2.0e6),
+            "rr": _sim_primary(100e-6, 100e-6, 1 / 1.4e6, 1 / 12e6),
+            "custom": _sim_primary(500e-6, 100e-6, 1 / 1.5e6, 1 / 6e6)}
+    res, calls, _, logs = _sim_calibrate(sims, replcap.ref_shape(4, 16, 16))
+    assert {(s.wp, s.pp) for c in calls for s in c[1].values()} == {(16, 16)}
+    rr = res["builds"]["rr"]
+    s = replcap.Shape(**rr["shape"])
+    assert rr["coarse"] and s.w < replcap.MIN_CONNS
+    d = res["suggest"]["write_pipeline"]
+    assert d < 16 and s.fw / d >= replcap.MIN_CONNS and s.fw / (2 * d) < replcap.MIN_CONNS
+    assert any("rr:" in m and "coarse step" in m and f"--write-pipeline {d}" in m for m in logs)
+
+
+def test_replcap_ref_shape_keeps_requests_in_flight_at_any_depth():
+    from offbench import replcap
+    assert replcap.ref_shape(4, 16, 16) == replcap.Shape(24, 16, 25, 16)
+    assert replcap.ref_shape(8, 8, 2) == replcap.Shape(96, 8, 200, 2)
+    assert replcap.ref_shape(2, 4, 16) == replcap.Shape(48, 4, 25, 16)
+    assert replcap.ref_shape(2, 4, 16, writers=10, readers=7) == replcap.Shape(10, 4, 7, 16)
+    assert replcap.coarse(replcap.Shape(6, 16, 2, 16)) == {"write_pipeline": 8, "p_pipeline": 2}
+    assert replcap.coarse(replcap.Shape(12, 8, 14, 2)) == {}
+
+
 def test_replcap_next_x_brackets_and_bisects_on_a_plateau():
     from offbench import replcap
     assert replcap.next_x([(10, 50.0)], 100.0) == 20          # extrapolate, at most doubling
@@ -1308,6 +1377,21 @@ def test_replcap_next_x_brackets_and_bisects_on_a_plateau():
     # bracket (0, 0)..(784, 1927): interpolation lands at 720, outside the middle half, so bisect
     assert replcap.next_x([(784, 1927.0)], 1770.0) == 392.0
     assert replcap.next_x([(196, 1600.0), (392, 1870.0), (784, 1927.0)], 1770.0) == 196 + 170 * 196 / 270
+
+
+def test_replcap_role_next_tells_a_plateau_from_a_slope():
+    import math
+    from offbench import replcap
+    # one point: Little's law, unless that is a creep down the top quarter
+    assert replcap.role_next([(400, 7000.0)], 558.0) == 400 * 558.0 / 7000.0
+    assert replcap.role_next([(768, 1250.0)], 1100.0) == 384
+    # two points above: a slope is followed, a plateau (an rr SET path at its limit) is halved
+    e = math.log(7000.0 / 711.0) / math.log(400 / 32)
+    assert replcap.role_next([(32, 711.0), (400, 7000.0)], 558.0) == 32 * (558.0 / 711.0) ** (1 / e)
+    assert replcap.role_next([(547, 1250.0), (768, 1251.0)], 890.0) == 547 / 2
+    # a measured bracket is next_x's
+    assert replcap.role_next([(64, 675.0), (137, 1250.0)], 890.0) == replcap.next_x([(64, 675.0), (137, 1250.0)],
+                                                                                    890.0)
 
 
 def _cap(build, readers, read, state="ok", cores=None, threads=79, rtt=0.05, w=800.0, r=1000.0, shape=(7, 9)):

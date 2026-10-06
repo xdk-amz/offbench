@@ -8,6 +8,7 @@ the doc's result table (report). Both run locally; nothing here executes on a ho
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import asdict, dataclass, fields, replace
 from typing import Callable, Optional
@@ -20,9 +21,17 @@ CAL_TOL = 0.05
 # One-rep probes search toward this fraction of the tolerance; the confirmation median must be within it.
 AIM = 0.6
 CONFIRM_ROUNDS = 3
-# Below this many connections one connection is a coarse step (one rr writer was 22% of X at 4 cores),
-# so the generator's pipeline is halved for a finer one.
+# Below this many connections one connection is a coarse step (one rr writer was 22% of X at 4 cores).
+# Calibration names a build that ends below it and the pipeline depth that would give it this many.
 MIN_CONNS = 10
+# Writes and reads queue apart when one role's latency reaches this multiple of the other's.
+APART = 3.0
+# A role whose rate rises by less than this power of its requests in flight is on its own plateau.
+FLAT = 0.3
+# Requests in flight the reference load holds: 6 writer connections per core and 25 primary reader
+# connections at depth 16, whatever depths the run uses.
+REF_WRITES_PER_CORE = 96
+REF_READS = 400
 # A step's replica read rate counts as still rising when it beats the previous in-sync step by more than this.
 RISING = 0.05
 GEN_BUSY = 0.95
@@ -79,6 +88,12 @@ def best(points: list, x: float, y: float) -> Optional[tuple]:
     return min(pts, key=lambda t: off(t[1], t[2], x, y)) if pts else None
 
 
+def ref_shape(cores: int, wp: int, pp: int, writers: int = 0, readers: int = 0) -> Shape:
+    """The reference load at the run's pipeline depths: the same requests in flight at any depth."""
+    return Shape(writers or max(1, round(REF_WRITES_PER_CORE * cores / wp)), wp,
+                 readers or max(1, round(REF_READS / pp)), pp)
+
+
 def next_x(pts: list, target: float) -> float:
     """Next abscissa for an increasing, concave f with f(0) = 0, from measured (x, f(x)) points.
 
@@ -99,27 +114,66 @@ def next_x(pts: list, target: float) -> float:
     return x
 
 
-def propose(points: list, x: float, y: float, min_conns: int = MIN_CONNS) -> Optional[Shape]:
+def role_next(pts: list, target: float) -> float:
+    """next_x for one role of a build whose roles queue apart, from that role's (requests in flight, rate).
+
+    With nothing measured below the target, f(0) = 0 stands in for it, and two points above tell a plateau
+    from a slope: where the rate barely rises between the two lowest (less than FLAT in log-log), halve the
+    lower; elsewhere step down that slope, at most halving. With one point, Little's law (the rate scales
+    with requests in flight) unless that lands in the top quarter, which on a plateau is a creep: halve.
+    A measured bracket is next_x's."""
+    above = sorted(p for p in pts if p[1] >= target)
+    if not above or any(p[1] < target and p[0] < above[0][0] for p in pts):
+        return next_x(pts, target)
+    xh, fh = above[0]
+    if len(above) > 1 and above[1][0] > xh:
+        x2, f2 = above[1]
+        e = math.log(f2 / fh) / math.log(x2 / xh)
+        return xh / 2 if e < FLAT else max(xh / 2, xh * (target / fh) ** (1 / min(1.0, e)))
+    x = xh * target / fh
+    return x if x <= 0.75 * xh else xh / 2
+
+
+def apart(points: list) -> bool:
+    """Writes and reads queue apart: at some point one role's latency (requests in flight / rate) was APART
+    times the other's, as when rr's SET path on main is at its limit while IO threads serve its reads. On a
+    shared thread both latencies grow together."""
+    for s, w, r in points:
+        if w > 0 and r > 0:
+            lat = (s.fw / w) / (s.fp / r)
+            if lat >= APART or lat <= 1 / APART:
+                return True
+    return False
+
+
+def propose(points: list, x: float, y: float, aim: float = AIM * CAL_TOL) -> Optional[Shape]:
     """Next shape to measure for one build, or None when no untried shape is left near the target.
 
-    Requests in flight, not connections, set a closed-loop primary's rates. The total in flight is searched
-    against X + Y, and the split between writers and readers comes from the closest point so far:
-    writes/reads there is k x (writes in flight / reads in flight), and the split is set so k x split = X/Y.
+    Pipeline depths stay those of the points (the run's, shared by every build); only connection counts move.
+    Requests in flight, not connections, set a closed-loop primary's rates.
+
+    When writes and reads queue apart (see apart()), each role is searched on its own points against its own
+    target, so a SET path at its limit is halved down its plateau while the reads stay where they are.
+    Otherwise both share a thread, and moving one moves the other: the total in flight is searched against
+    X + Y, the split comes from the closest point so far (writes/reads there is k x writes in flight / reads
+    in flight, and the split is set so k x split = X/Y), and each role moves only toward its own target, so a
+    role above it gets no more connections than at the closest point and one below no fewer.
     """
     pts = _merged(points)
     s, w, r = min(pts, key=lambda t: off(t[1], t[2], x, y))
     tried = {t[0] for t in pts}
     if r > 0 and w > 0:
-        k = (w / r) / (s.fw / s.fp)
-        q = (x / y) / k
-        n = next_x([(t[0].fw + t[0].fp, t[1] + t[2]) for t in pts], x + y)
-        fw, fp = n * q / (1 + q), n / (1 + q)
-        wp, pp = s.wp, s.pp
-        while wp > 1 and fw / wp < min_conns:
-            wp //= 2
-        while pp > 1 and fp / pp < min_conns:
-            pp //= 2
-        cand = Shape(max(1, round(fw / wp)), wp, max(1, round(fp / pp)), pp)
+        if apart(pts):
+            cw = max(1, round(role_next([(t[0].fw, t[1]) for t in pts], x) / s.wp))
+            cp = max(1, round(role_next([(t[0].fp, t[2]) for t in pts], y) / s.pp))
+        else:
+            k = (w / r) / (s.fw / s.fp)
+            q = (x / y) / k
+            n = next_x([(t[0].fw + t[0].fp, t[1] + t[2]) for t in pts], x + y)
+            cw, cp = max(1, round(n * q / (1 + q) / s.wp)), max(1, round(n / (1 + q) / s.pp))
+            cw = min(cw, s.w) if w > x * (1 + aim) else max(cw, s.w) if w < x * (1 - aim) else cw
+            cp = min(cp, s.p) if r > y * (1 + aim) else max(cp, s.p) if r < y * (1 - aim) else cp
+        cand = replace(s, w=cw, p=cp)
         if cand not in tried:
             return cand
     # Rounded onto a shape already measured: from the closest point, step the count whose rate is further
@@ -131,6 +185,18 @@ def propose(points: list, x: float, y: float, min_conns: int = MIN_CONNS) -> Opt
         if c.w >= 1 and c.p >= 1 and c not in tried:
             return c
     return None
+
+
+def coarse(shape: Shape) -> dict:
+    """Roles with fewer than MIN_CONNS connections, each with the largest depth that would give it that many."""
+    out = {}
+    for role, n, d in (("write_pipeline", shape.w, shape.wp), ("p_pipeline", shape.p, shape.pp)):
+        if n < MIN_CONNS and d > 1:
+            nd = d
+            while nd > 1 and n * d / nd < MIN_CONNS:
+                nd //= 2
+            out[role] = nd
+    return out
 
 
 # Measure callback: {build: shape} and reps -> {build: [records]}, every build at its shape with no replica
@@ -158,7 +224,9 @@ def calibrate(measure: Measure, builds: list[str], x: float, y: float, start: di
               seed: Optional[dict] = None) -> dict:
     """Per build, the shape whose primary delivers X and Y within tol, probed one rep at a time and then
     confirmed with confirm_reps interleaved reps. seed: the reference median per build, as (shape, writes,
-    reads) points.
+    reads) points. Every probe keeps the pipeline depths of start and seed, which the caller gives every
+    build alike; a build that ends below MIN_CONNS connections of a role is listed under `coarse`, and
+    `suggest` holds the depths that would give every build at least that many.
 
     One-rep probes are noisy (~1%), so the search aims inside AIM x tol and only the confirmation's median
     has to land within tol."""
@@ -177,7 +245,7 @@ def calibrate(measure: Measure, builds: list[str], x: float, y: float, start: di
             if bp and off(bp[1], bp[2], x, y) <= aim:
                 chosen[b] = bp[0]
             else:
-                cur[b] = propose(points[b], x, y) if points[b] else shape[b]
+                cur[b] = propose(points[b], x, y, aim) if points[b] else shape[b]
         while cur:
             cur = {b: s for b, s in cur.items() if s is not None and probes[b] < max_probes}
             if not cur:
@@ -203,7 +271,7 @@ def calibrate(measure: Measure, builds: list[str], x: float, y: float, start: di
                     retried.add((b, s))       # an invalid probe is measured again, once
                     nxt[b] = s
                 else:
-                    nxt[b] = propose(points[b], x, y) if points[b] else None
+                    nxt[b] = propose(points[b], x, y, aim) if points[b] else None
             cur = nxt
         for b in todo:
             if b not in chosen:
@@ -229,7 +297,8 @@ def calibrate(measure: Measure, builds: list[str], x: float, y: float, start: di
             r_ = statistics.median(delivered(r)[1] for r in v) if v else float("nan")
             e = off(w, r_, x, y) if v else float("inf")
             result[b] = {"shape": asdict(chosen[b]), "write_kcmd_s": w, "read_kcmd_s": r_, "valid_reps": len(v),
-                         "reps": confirm_reps, "off": e, "probes": probes[b], "converged": ok and e <= tol}
+                         "reps": confirm_reps, "off": e, "probes": probes[b], "converged": ok and e <= tol,
+                         "coarse": coarse(chosen[b])}
             log(f"{b}: confirm {chosen[b].label()}: {w:.0f}k writes {w / x - 1:+.1%}, {r_:.0f}k reads "
                 f"{r_ / y - 1:+.1%} ({len(v)}/{confirm_reps} valid)")
             if not result[b]["converged"]:
@@ -238,8 +307,20 @@ def calibrate(measure: Measure, builds: list[str], x: float, y: float, start: di
         if not retry:
             break
         todo = retry
+    # One connection is a coarse step for a build below MIN_CONNS of a role; every build shares the depths,
+    # so the suggestion is the lowest any build needs.
+    suggest: dict = {}
+    for v in result.values():
+        for role, d in v["coarse"].items():
+            suggest[role] = min(d, suggest.get(role, d))
+    for b, v in result.items():
+        for role, d in v["coarse"].items():
+            s = Shape(**v["shape"])
+            n, cur = (s.w, s.wp) if role == "write_pipeline" else (s.p, s.pp)
+            log(f"{b}: {n} {'writer' if role == 'write_pipeline' else 'primary reader'} connections at P{cur}, "
+                f"a coarse step; --{role.replace('_', '-')} {d} would give it {MIN_CONNS} or more")
     return {"targets": {"write_kcmd_s": x, "read_kcmd_s": y}, "tol": tol, "builds": result,
-            "converged": all(v["converged"] for v in result.values()),
+            "converged": all(v["converged"] for v in result.values()), "suggest": suggest,
             "points": {b: [{"kind": k, **asdict(s), "write_kcmd_s": w, "read_kcmd_s": r}
                            for k, (s, w, r) in zip(kinds[b], points[b])] for b in builds}}
 
