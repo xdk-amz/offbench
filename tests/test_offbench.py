@@ -1374,6 +1374,20 @@ def test_replcap_steps_from_the_point_closest_on_both_roles():
     assert s.wp == 4 and s.pp == 16 and s.w <= 16 and 7 <= s.p <= 9, s
 
 
+def test_replcap_split_follows_k_with_the_load():
+    """k = (writes/reads) / (writes in flight / reads in flight) rises as rr's 2-core load lightens: carried
+    from the closest point to the total the search picks, not held at the closest point's value."""
+    from offbench import replcap
+    pts = [(replcap.Shape(w, 4, p, 16), W, R) for w, p, W, R in
+           [(48, 25, 419, 1428), (24, 12, 407, 1392), (12, 6, 438, 1202), (17, 9, 434, 1325), (15, 8, 427, 1318)]]
+    s, w, r = pts[1]
+    k = (w / r) / (s.fw / s.fp)
+    assert replcap._split_at(pts, s, w, r, s.fw + s.fp) == k
+    assert k < replcap._split_at(pts, s, w, r, 180) <= k * (288 / 180) ** replcap.K_SLOPE
+    flat = [(t[0], t[1], t[2] * 1.0) for t in pts[:1]] + [pts[1]]
+    assert replcap._split_at(flat, s, w, r, 180) == k            # too few points to follow a slope
+
+
 def test_replcap_ref_shape_keeps_requests_in_flight_at_any_depth():
     from offbench import replcap
     assert replcap.ref_shape(4, 16, 16) == replcap.Shape(24, 16, 25, 16)

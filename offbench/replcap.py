@@ -26,6 +26,8 @@ CONFIRM_ROUNDS = 3
 MIN_CONNS = 10
 # Writes and reads queue apart when one role's latency reaches this multiple of the other's.
 APART = 3.0
+# Largest log-log slope of the writer/reader split factor k against the total load that the search follows.
+K_SLOPE = 0.5
 # A role whose rate rises by less than this power of its requests in flight is on its own plateau.
 FLAT = 0.3
 # Requests in flight the reference load holds: 6 writer connections per core and 25 primary reader
@@ -146,6 +148,25 @@ def apart(points: list) -> bool:
     return False
 
 
+def _split_at(pts: list, s: Shape, w: float, r: float, n: float) -> float:
+    """k = (writes/reads) / (writes in flight / reads in flight) at n requests in flight in total.
+
+    k is measured at the closest point s. On some primaries it also moves with the load: rr's single IO thread
+    at 2 cores favours writes as the load lightens (k 0.7 at 180 in flight, 0.6 at 290). When the points span
+    enough load, k at s is carried to n along the log-log slope of k against the total, held within +-K_SLOPE."""
+    k = (w / r) / (s.fw / s.fp)
+    rows = [(math.log(t[0].fw + t[0].fp), math.log((t[1] / t[2]) / (t[0].fw / t[0].fp))) for t in pts
+            if t[1] > 0 and t[2] > 0]
+    if len(rows) < 3 or max(a for a, _ in rows) - min(a for a, _ in rows) < math.log(1.3):
+        return k
+    ma = sum(a for a, _ in rows) / len(rows)
+    mb = sum(b for _, b in rows) / len(rows)
+    saa = sum((a - ma) ** 2 for a, _ in rows)
+    slope = sum((a - ma) * (b - mb) for a, b in rows) / saa
+    slope = max(-K_SLOPE, min(K_SLOPE, slope))
+    return k * (n / (s.fw + s.fp)) ** slope
+
+
 def _toward(n: int, cur: int, ratio: float, aim: float) -> int:
     """A role's next connection count, moved only toward its own target from cur, whose rate is ratio x the
     target: down when above it, up when below (by at least one connection), anywhere when within aim."""
@@ -185,9 +206,8 @@ def propose(points: list, x: float, y: float, aim: float = AIM * CAL_TOL) -> Opt
             cw = max(1, round(role_next([(t[0].fw, t[1]) for t in pts], x) / s.wp))
             cp = max(1, round(role_next([(t[0].fp, t[2]) for t in pts], y) / s.pp))
         else:
-            k = (w / r) / (s.fw / s.fp)
-            q = (x / y) / k
             n = next_x([(t[0].fw + t[0].fp, t[1] + t[2]) for t in pts], x + y)
+            q = (x / y) / _split_at(pts, s, w, r, n)
             cw, cp = max(1, round(n * q / (1 + q) / s.wp)), max(1, round(n / (1 + q) / s.pp))
             cw = _toward(cw, s.w, w / x, aim)
             cp = _toward(cp, s.p, r / y, aim)
