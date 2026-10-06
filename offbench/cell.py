@@ -203,9 +203,16 @@ def cachecannon_toml(cell: Cell, window_s: int = 6, warmup_s: int = 3, timeout: 
 
 
 def latency_from_samples(files: list[Path], w_a: float, w_b: float) -> Optional[Latency]:
-    """Aggregate cachecannon's per-second "sample" JSON lines that fall inside the window.
-    Same rule as rig/cclat.py: median across seconds for percentiles, max of maxima."""
-    by_sec: dict[int, list[dict]] = {}
+    """Aggregate cachecannon's per-second "sample" JSON lines that fall inside the window."""
+    return latency_from_window(window_samples(files, w_a, w_b))
+
+
+LATENCY_FIELDS = ("p50_us", "p90_us", "p99_us", "p999_us", "p9999_us")
+
+
+def window_samples(files: list[Path], w_a: float, w_b: float) -> list[dict]:
+    """The per-second samples inside the window, each with its time as t."""
+    out = []
     for f in files:
         for line in f.read_text(errors="replace").splitlines():
             if not line.startswith("{") or '"sample"' not in line:
@@ -221,18 +228,27 @@ def latency_from_samples(files: list[Path], w_a: float, w_b: float) -> Optional[
             t = datetime.fromisoformat(m.group(1) + m.group(2) if m else ts).timestamp()
             if t < w_a + 1.0 or t > w_b + 0.05:
                 continue
-            by_sec.setdefault(int(t), []).append(d)
+            out.append({"t": t, **{k: d[k] for k in LATENCY_FIELDS + ("max_us", "req_s")}})
+    return out
+
+
+def latency_from_window(samples: list[dict]) -> Latency:
+    """Same rule as rig/cclat.py: per second, the median of each percentile across generators, the max of their
+    maxima and the sum of their rates; then the median across seconds and the max of maxima. Generators on
+    several hosts merge the same way, since the hosts are chrony-synced."""
+    by_sec: dict[int, list[dict]] = {}
+    for s in samples:
+        by_sec.setdefault(int(s["t"]), []).append(s)
     if not by_sec:
         return Latency(samples=0)
-    fields = ("p50_us", "p90_us", "p99_us", "p999_us", "p9999_us")
     rows = []
     for _, ss in sorted(by_sec.items()):
-        row = {k: statistics.median(x[k] for x in ss) for k in fields}
+        row = {k: statistics.median(x[k] for x in ss) for k in LATENCY_FIELDS}
         row["max_us"] = max(x["max_us"] for x in ss)
         row["req_s"] = sum(x["req_s"] for x in ss)
         rows.append(row)
     return Latency(
-        **{k: statistics.median(r[k] for r in rows) for k in fields},
+        **{k: statistics.median(r[k] for r in rows) for k in LATENCY_FIELDS},
         max_us=max(r["max_us"] for r in rows), samples=len(rows),
         gen_kreq_s=statistics.fmean(r["req_s"] for r in rows) / 1000.0,
     )

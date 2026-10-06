@@ -620,16 +620,27 @@ CAL_OWNED = ("bins", "iot", "share_bins", "bin_write_conns", "bin_p_conns")
 
 
 def _repl_names(a: argparse.Namespace, cal: Optional[dict] = None):
-    """Role -> host name from the flags, filled from (and checked against) a calibration's hosts."""
-    flags = {"primary": a.primary, "replica": a.replica, "gen": a.gen, "rgen": a.reader_gen}
-    opt = {"primary": "--primary", "replica": "--replica", "gen": "--gen", "rgen": "--reader-gen"}
-    for role, host in ((cal or {}).get("hosts") or {}).items():
-        if flags.get(role) and flags[role] != host:
-            return f"{opt[role]} {flags[role]} differs from the calibration's {host}: it holds on the hosts it ran on"
-        flags[role] = host
+    """Role -> host name from the flags, filled from (and checked against) a calibration's hosts. The replica
+    readers' hosts (--reader-gen a,b) become roles rgen, rgen2, ..."""
+    from . import repl
+    flags = {"primary": a.primary, "replica": a.replica, "gen": a.gen}
+    opt = {"primary": "--primary", "replica": "--replica", "gen": "--gen"}
+    readers = [h for h in (a.reader_gen or "").split(",") if h]
+    hosts = (cal or {}).get("hosts") or {}
+    held = "it holds on the hosts it ran on"
+    for role in flags:
+        if hosts.get(role):
+            if flags[role] and flags[role] != hosts[role]:
+                return f"{opt[role]} {flags[role]} differs from the calibration's {hosts[role]}: {held}"
+            flags[role] = hosts[role]
+    cal_readers = [hosts[k] for k in repl.reader_keys(hosts)]
+    if cal_readers:
+        if readers and readers != cal_readers:
+            return f"--reader-gen {','.join(readers)} differs from the calibration's {','.join(cal_readers)}: {held}"
+        readers = cal_readers
     if not all(flags[k] for k in ("primary", "replica", "gen")):
         return "--primary, --replica and --gen are required"
-    return {k: v for k, v in flags.items() if v}
+    return {**{k: v for k, v in flags.items() if v}, **dict(zip(repl.reader_roles(len(readers)), readers))}
 
 
 def _repl_hosts(a: argparse.Namespace, cal: Optional[dict] = None):
@@ -1031,7 +1042,9 @@ def main(argv=None) -> int:
         sp.add_argument("--primary", required=hosts_required); sp.add_argument("--replica", required=hosts_required)
         sp.add_argument("--gen", required=hosts_required,
                         help="host for the writers and primary readers (and the replica readers without --reader-gen)")
-        sp.add_argument("--reader-gen", default="", help="host for the replica readers (default: --gen)")
+        sp.add_argument("--reader-gen", default="",
+                        help="host or hosts (comma-separated) for the replica readers; several split each step's "
+                             "connections evenly (default: --gen)")
         sp.add_argument("--window", type=int, default=6, help="measurement window per rep, seconds")
         sp.add_argument("--max-rtt-ms", type=float, default=0.15,
                         help="refuse to run if the generator's median round trip to either server exceeds this (0 = off)")

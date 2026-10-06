@@ -8,10 +8,11 @@ reaching them: they are recorded with each rep, but they are not results.
 
 ## Setup
 
-- Four hosts: primary, replica, one generator host for the primary's writers and readers, and a second for
-  the replica's readers, which need a whole host at 16 cores (79 generator cores top out around 22M reads/s).
-- Every generator-to-server path must measure 0.15 ms or less. `repl-calibrate` and `repl-run` ping both
-  generator paths before the first rep and refuse a slower one (`--max-rtt-ms`). The primary-to-replica path
+- Four hosts: primary, replica, one generator host for the primary's writers and readers, and one for the
+  replica's readers. From 16 cores up give the replica's readers two hosts (`--reader-gen a,b`, five hosts in
+  all): one host's 79 generator cores top out around 22M reads/s, which a 16-core replica can pass.
+- Every generator-to-server path must measure 0.15 ms or less. `repl-calibrate` and `repl-run` ping every
+  generator path before the first rep and refuse a slower one (`--max-rtt-ms`). The primary-to-replica path
   is recorded, not gated.
 - Equal cores per server. A build whose main thread shares a core with its first IO thread (the staged loop)
   runs one more IO thread on the same cores (`--share-bins`).
@@ -177,6 +178,10 @@ behind at 200 and 400 readers.
 - `--p-conns` is one count for every build; `--bin-p-conns` or the calibration sets it per build.
   `--p-pipeline` is the primary readers' pipeline (default: `--pipelines`).
 - In `--bins`, each `|config value` goes to the replica only.
+- `--reader-gen a,b` runs the replica readers on both hosts, each with an even share of every step's
+  connections. Their latency merges per second like generators on one host; `reader.threads` and
+  `reader.cores` are totals and `reader.parts` holds each host's. Every reader host's round trip
+  (`gen_replica`, `gen_replica2`) and ENA counters are checked, and the RTT flag uses the slowest.
 - `--out` appends, and writes a `.log` beside it.
 - One record is one rep. Rates are k/s: `primary.write_kcmd_s` and `primary.read_kcmd_s` are X and Y as
   delivered, `replica.read_kcmd_s` the replica's reads (its total minus the SETs it applied),

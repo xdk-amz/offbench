@@ -916,6 +916,144 @@ def test_repl_rtt_stats_and_far_generator_gate():
     assert repl.far_paths(dict(rtt, gen_replica={"median_ms": 0.1}), 0.15) == {}
 
 
+def _sample(t, p99, req_s=1_000_000.0):
+    import json
+    from datetime import datetime, timezone
+    ts = datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return json.dumps({"type": "sample", "ts": ts, "p50_us": p99 / 4, "p90_us": p99 / 2, "p99_us": p99,
+                       "p999_us": p99 * 2, "p9999_us": p99 * 3, "max_us": p99 * 10, "req_s": req_s})
+
+
+def test_reader_samples_from_two_hosts_merge_like_two_generators_on_one(tmp_path):
+    from offbench.cell import latency_from_samples, latency_from_window, window_samples
+    t0 = 1_700_000_000.0
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    a.write_text("\n".join(_sample(t0 + s + 0.2, 100) for s in range(8)) + "\n")
+    b.write_text("\n".join(_sample(t0 + s + 0.7, 300 + 10 * s) for s in range(8)) + "\n")
+    one_host = latency_from_samples([a, b], t0, t0 + 6)
+    two_hosts = latency_from_window(window_samples([a], t0, t0 + 6) + window_samples([b], t0, t0 + 6))
+    assert two_hosts == one_host and one_host.samples == 5
+    assert one_host.p99_us == (100 + 330) / 2 and one_host.gen_kreq_s == 2000.0
+
+
+def test_repl_reader_roles_and_connection_split():
+    from offbench import repl
+    assert repl.reader_roles(3) == ["rgen", "rgen2", "rgen3"]
+    assert repl.reader_keys({"primary": 1, "rgen2": 1, "gen": 1, "rgen": 1}) == ["rgen", "rgen2"]
+    assert repl.split_conns(101, 2) == [51, 50] and repl.split_conns(1, 2) == [1, 0]
+
+
+class _ReaderHostsSsh:
+    """run_one's host side: primary P, replica R, generator G and replica-reader hosts named in ticks (cores
+    each reader host's generator uses)."""
+
+    def __init__(self, ticks, server_snaps):
+        self.calls, self.ticks, self.server_snaps = [], ticks, server_snaps
+
+    def call(self, role, payload, timeout=120):
+        from offbench.cell import CLK_TCK
+        from offbench.repl import ALLOWANCE_FIELDS
+        self.calls.append((role.name, payload))
+        act, z = payload["action"], {k: 0 for k in ALLOWANCE_FIELDS}
+        if act == "status":
+            return {"master_link_status": "up", "dbsize": 100000, "connected_clients": "2400",
+                    "instantaneous_ops_per_sec": "20000"}
+        if act == "server_start":
+            return {"pid": 1}
+        if act == "gen_start":
+            return {"alive": True}
+        if act == "gen_alive":
+            return {g: True for g in payload["gens"]}
+        if act == "rtt":
+            return {ip: {"median_ms": 0.1, "min_ms": 0.09} for ip in payload["ips"]}
+        if act == "measure":
+            if payload.get("server"):
+                return self.server_snaps[role.name]
+            n = self.ticks.get(role.name, 0) * 6 * CLK_TCK
+            return {"a": {"gt": 0.0, "gen_ticks": {g: 0 for g in payload["gens"]}, "ena": z},
+                    "b": {"gt": 6.0, "gen_ticks": {g: n for g in payload["gens"]}, "ena": z}}
+        if act == "gen_stop":
+            p99 = {"m4": 100, "m5": 300}.get(role.name, 1)
+            return {g: {"alive_at_stop": True, "timeouts": 0, "err_pct": 0.0, "err_tail": "",
+                        "latency": {"p99_us": p99},
+                        "samples": [{"t": s + 0.5, "p50_us": 1, "p90_us": 1, "p99_us": p99, "p999_us": 1,
+                                     "p9999_us": 1, "max_us": 9, "req_s": 1e6} for s in range(1, 6)]}
+                    for g in payload["gens"]}
+        return {"ok": True, "asserts": 0, "client_closed_for_obuf": 0}
+
+    def start(self, role, payload):
+        out = self.call(role, payload)
+        return lambda timeout=120: out
+
+
+def _reader_hosts_run(monkeypatch, readers):
+    from offbench import repl
+    from offbench.cell import CLK_TCK
+    monkeypatch.setattr(repl.time, "sleep", lambda s: None)
+    pa = {"total_commands_processed": "0", "cmdstat_set": "calls=0,usec=1", "master_repl_offset": "10000000",
+          "sync_full": "1", "connected_clients": "2400", "used_active_time_main_thread": "0"}
+    pb = dict(pa, total_commands_processed="12000000", cmdstat_set="calls=12000000,usec=1",
+              used_active_time_main_thread="6.0", master_repl_offset="600000000")
+    ra = {"total_commands_processed": "0", "cmdstat_set": "calls=0", "master_link_status": "up",
+          "master_sync_in_progress": "0", "connected_clients": "2400", "slave_repl_offset": "0"}
+    rb = dict(ra, total_commands_processed="42000000", cmdstat_set="calls=12000000", slave_repl_offset="590000000")
+    ssh = _ReaderHostsSsh({"m4": 40, "m5": 30}, {"P": {"a": _snap(0.0, pa), "b": _snap(6.0, pb, main=6 * CLK_TCK)},
+                                                 "R": {"a": _snap(0.0, ra), "b": _snap(6.0, rb)}})
+    names = [("primary", "P"), ("replica", "R"), ("gen", "G")] + list(zip(repl.reader_roles(len(readers)), readers))
+    roles = {k: repl.Role(n, "", f"10.0.0.{i}") for i, (k, n) in enumerate(names)}
+    cell = repl.ReplCell(16, 101, 16, write_conns=8, write_pipeline=8, p_conns=15, p_pipeline=1)
+    rec = repl.run_one(ssh, roles, cell, repl.ReplBin("a", "1"), 1, window_s=6, all_servers=[], run_id="r",
+                       log=lambda m: None)
+    starts = [(h, p["conns"], p["threads"]) for h, p in ssh.calls
+              if p["action"] == "gen_start" and p["name"] == "reader"]
+    return ssh, roles, rec, starts
+
+
+def test_repl_run_one_splits_replica_readers_across_hosts(monkeypatch):
+    from offbench import repl
+    ssh, roles, rec, starts = _reader_hosts_run(monkeypatch, ["m4", "m5"])
+    assert starts == [("m4", 51, 51), ("m5", 50, 50)]
+    assert rec["valid"], rec["invalid"]
+    g = rec["reader"]
+    assert rec["hosts"]["rgen2"] == "m5" and g["threads"] == 101 and g["cores"] == 70.0
+    assert [(p["host"], p["conns"], p["threads"], p["cores"]) for p in g["parts"]] == [
+        ("m4", 51, 51, 40.0), ("m5", 50, 50, 30.0)]
+    # per second the median across the two hosts, as for two generators on one host
+    assert g["latency"]["p99_us"] == 200 and g["latency"]["gen_kreq_s"] == 2000.0
+    assert "samples" not in g and "samples" not in rec["writer"]
+    assert rec["rgen_ena"] == {k: 0 for k in repl.ALLOWANCE_FIELDS}
+    rtt = repl.measure_rtt(ssh, roles)
+    assert list(rtt) == ["gen_primary", "gen_replica", "gen_replica2", "primary_replica"]
+    assert ("m5", [roles["replica"].ip]) in [(h, p["ips"]) for h, p in ssh.calls if p["action"] == "rtt"]
+
+
+def test_repl_run_one_keeps_one_reader_host_records_as_they_were(monkeypatch):
+    _, _, rec, starts = _reader_hosts_run(monkeypatch, ["m4"])
+    assert starts == [("m4", 101, 79)] and rec["valid"], rec["invalid"]
+    g = rec["reader"]
+    assert "parts" not in g and "samples" not in g
+    assert g["threads"] == 79 and g["cores"] == 40.0 and g["latency"] == {"p99_us": 100}
+
+
+def test_cli_reader_gen_takes_several_hosts_and_holds_to_the_calibration():
+    import argparse
+    from offbench import cli
+    ns = lambda rg="", h=("a", "b", "c"): argparse.Namespace(primary=h[0], replica=h[1], gen=h[2], reader_gen=rg)
+    assert cli._repl_names(ns("d,e")) == {"primary": "a", "replica": "b", "gen": "c", "rgen": "d", "rgen2": "e"}
+    cal = {"hosts": {"primary": "a", "replica": "b", "gen": "c", "rgen": "d", "rgen2": "e"}}
+    assert cli._repl_names(ns(h=(None, None, None)), cal) == cal["hosts"]
+    assert "differs from the calibration's d,e" in cli._repl_names(ns("d"), cal)
+
+
+def test_replcap_rtt_flag_uses_the_slowest_reader_host():
+    from offbench import replcap
+    rec = {"cell": {"conns": 100, "pipeline": 16}, "replica": {"read_kcmd_s": 10000.0},
+           "rtt_ms": {"gen_replica": {"min_ms": 0.05}}}
+    assert not replcap.rtt_flag([rec])          # 160 us per request against a 50 us round trip
+    rec["rtt_ms"]["gen_replica2"] = {"min_ms": 0.2}
+    assert replcap.rtt_flag([rec])
+
+
 def test_repl_read_target_primary_key_and_client_gate():
     from offbench import repl
     c = repl.ReplCell(16, 25, 4, write_conns=16, write_pipeline=16, read_target="primary")
@@ -1023,11 +1161,11 @@ def test_repl_reader_host_layout_and_its_ena_counters():
     gens = {g: {"alive_at_stop": True, "timeouts": 0, "latency": None} for g in ("writer", "preader", "reader")}
     stops = {"primary": {"asserts": 0}, "replica": {"asserts": 0}}
     roles = {k: repl.Role(k, "", "") for k in ("primary", "replica", "gen", "rgen")}
-    rec = repl.build_record(c, repl.ReplBin("a", "1"), 1, roles, pm, rm, gm, gens, stops, 6, "r", rgm=rgm)
+    rec = repl.build_record(c, repl.ReplBin("a", "1"), 1, roles, pm, rm, gm, gens, stops, 6, "r", rgms=[rgm])
     assert rec["valid"], rec["invalid"]
     assert rec["writer"]["cores"] == 1.0 and rec["reader"]["cores"] == 10.0 and rec["hosts"]["rgen"] == "rgen"
     rgm["b"]["ena"] = dict(z, pps_allowance_exceeded=7)
-    rec = repl.build_record(c, repl.ReplBin("a", "1"), 1, roles, pm, rm, gm, gens, stops, 6, "r", rgm=rgm)
+    rec = repl.build_record(c, repl.ReplBin("a", "1"), 1, roles, pm, rm, gm, gens, stops, 6, "r", rgms=[rgm])
     assert rec["invalid"] == ["reader gen ENA allowance exceeded {'pps_allowance_exceeded': 7}"]
 
 

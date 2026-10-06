@@ -392,10 +392,12 @@ def reader_threads(rec: dict) -> int:
 
 def rtt_flag(valid: list) -> bool:
     """The replica readers' mean request latency (connections x pipeline / read rate) is under twice the
-    minimum ping from their generator to the replica: the round trip is over half of each request."""
+    minimum ping from their generator to the replica (the slowest of their hosts): the round trip is over
+    half of each request."""
     ratios = []
     for r in valid:
-        rtt = ((r.get("rtt_ms") or {}).get("gen_replica") or {}).get("min_ms")
+        mins = [(v or {}).get("min_ms") for k, v in (r.get("rtt_ms") or {}).items() if k.startswith("gen_replica")]
+        rtt = max((m for m in mins if m), default=None)
         rate = r["replica"]["read_kcmd_s"] * 1000.0
         if rtt and rate:
             ratios.append(r["cell"]["conns"] * r["cell"]["pipeline"] / rate * 1e6 / (rtt * 1000.0))

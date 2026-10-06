@@ -38,8 +38,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .cell import (CLK_TCK, PORT, CellError, Paths, _run, acl_setuser_cmds, assert_none,
-                   cachecannon_toml, check_pintune, kill_matching, latency_from_samples,
-                   pids_matching, pin_server_threads, server_cmd, server_launch_argv)
+                   cachecannon_toml, check_pintune, kill_matching, latency_from_window,
+                   pids_matching, pin_server_threads, server_cmd, server_launch_argv, window_samples)
 from .schema import Cell
 
 # Generator host: cpu0 housekeeping, 17-32 IRQ set (pintune.sh), the rest split
@@ -50,8 +50,8 @@ READER_CPUS = "56-95"
 # reader carries the largest load (14.6M GET/s needed all 26 cores of an even split), so it gets the most.
 TRI_CPUS = {"writer": "1-8", "preader": "9-16,33-44", "reader": "45-95"}
 TRI_THREADS = {"writer": 8, "preader": 20, "reader": 51}
-# With --reader-gen the replica readers get a host of their own (everything but cpu0 and the IRQ set), and the
-# writer and primary readers split the generator host.
+# With --reader-gen the replica readers get a host of their own (everything but cpu0 and the IRQ set), or
+# several with their connections split evenly, and the writer and primary readers split the generator host.
 PAIR_CPUS = {"writer": "1-16", "preader": "33-95"}
 PAIR_THREADS = {"writer": 16, "preader": 63}
 SOLO_CPUS, SOLO_THREADS = "1-16,33-95", 79
@@ -61,6 +61,27 @@ ALLOWANCE_FIELDS = ("bw_in_allowance_exceeded", "bw_out_allowance_exceeded",
 LAGGING = "replica fell behind"
 # A rep whose primary delivered its target writes or reads more than this far off is invalid.
 DRIFT_TOL = 0.07
+
+
+def reader_roles(n: int) -> list[str]:
+    """Role names for n replica-reader hosts: rgen, rgen2, rgen3, ..."""
+    return ["rgen"] + [f"rgen{i}" for i in range(2, n + 1)]
+
+
+def reader_keys(roles: dict) -> list[str]:
+    """The replica-reader roles present, in order."""
+    return [k for k in reader_roles(len(roles)) if k in roles]
+
+
+def rtt_path(i: int) -> str:
+    """The round-trip path from the i-th replica-reader host (from 0) to the replica."""
+    return "gen_replica" if i == 0 else f"gen_replica{i + 1}"
+
+
+def split_conns(conns: int, n: int) -> list[int]:
+    """conns over n hosts as evenly as possible, the first ones taking the remainder."""
+    q, r = divmod(conns, n)
+    return [q + (i < r) for i in range(n)]
 
 
 def fell_behind(rec: dict) -> bool:
@@ -298,7 +319,8 @@ def agent(a: dict) -> dict:
             kill_matching(_gen_pat(g))
             out = WORK / f"{g}.json"
             text = out.read_text(errors="replace") if out.exists() else ""
-            lat = latency_from_samples([out], a["w_a"], a["w_b"]) if out.exists() else None
+            samples = window_samples([out], a["w_a"], a["w_b"]) if out.exists() else []
+            lat = latency_from_window(samples) if out.exists() else None
             m = re.search(r'"timeouts":\s*(\d+)', text)
             e = re.search(r'"err_pct":\s*([\d.]+)', text)
             tail = ""
@@ -308,7 +330,7 @@ def agent(a: dict) -> dict:
                 tail = lines[-1] if lines else ""
             res[g] = {"alive_at_stop": alive, "latency": asdict(lat) if lat else None,
                       "timeouts": int(m.group(1)) if m else None,
-                      "err_pct": float(e.group(1)) if e else None, "err_tail": tail}
+                      "err_pct": float(e.group(1)) if e else None, "err_tail": tail, "samples": samples}
         return res
 
     if act == "server_stop":
@@ -492,9 +514,11 @@ class Ssh:
 
 
 def measure_rtt(ssh: Ssh, roles: dict) -> dict:
-    """Median ICMP round trip on the three paths a rep uses, over the private IPs."""
+    """Median ICMP round trip on every path a rep uses, over the private IPs."""
     P, R, G = roles["primary"], roles["replica"], roles["gen"]
-    paths = {"gen_primary": (G, P), "gen_replica": (roles.get("rgen", G), R), "primary_replica": (P, R)}
+    readers = [roles[k] for k in reader_keys(roles)] or [G]
+    paths = {"gen_primary": (G, P), **{rtt_path(i): (h, R) for i, h in enumerate(readers)},
+             "primary_replica": (P, R)}
     waits = {k: (ssh.start(src, {"action": "rtt", "ips": [dst.ip]}), dst.ip) for k, (src, dst) in paths.items()}
     return {k: w(timeout=120)[ip] for k, (w, ip) in waits.items()}
 
@@ -584,7 +608,8 @@ def server_metrics(m: dict) -> dict:
 
 
 def build_record(cell: ReplCell, b: ReplBin, rep: int, roles: dict, pm: dict, rm: dict, gm: dict,
-                 gens: dict, stops: dict, window_s: int, run_id: str, rgm: Optional[dict] = None) -> dict:
+                 gens: dict, stops: dict, window_s: int, run_id: str, rgms: Optional[list] = None) -> dict:
+    """rgms: one measurement per replica-reader host, in the order of the reader's parts."""
     p, r = server_metrics(pm), server_metrics(rm)
     # The replica's total includes the SETs it applied from the replication stream.
     r["read_kcmd_s"] = r["total_kcmd_s"] - r["set_kcmd_s"]
@@ -593,8 +618,16 @@ def build_record(cell: ReplCell, b: ReplBin, rep: int, roles: dict, pm: dict, rm
     def cores(m: dict) -> dict:
         span = m["b"]["gt"] - m["a"]["gt"]
         return {g: (m["b"]["gen_ticks"][g] - m["a"]["gen_ticks"][g]) / CLK_TCK / span for g in m["a"]["gen_ticks"]}
-    gen_cores = {**cores(gm), **(cores(rgm) if rgm else {})}
-    gen_ena = {k: gm["b"]["ena"][k] - gm["a"]["ena"][k] for k in ALLOWANCE_FIELDS}
+
+    def ena(m: dict) -> dict:
+        return {k: m["b"]["ena"][k] - m["a"]["ena"][k] for k in ALLOWANCE_FIELDS}
+    rgms = rgms or []
+    gen_cores, rcores = cores(gm), [cores(m) for m in rgms]
+    for g in (rcores[0] if rcores else {}):
+        gen_cores[g] = sum(c.get(g, 0.0) for c in rcores)
+    for part, m, c in zip((gens.get("reader") or {}).get("parts") or [], rgms, rcores):
+        part["cores"], part["ena"] = c.get("reader"), ena(m)
+    gen_ena = ena(gm)
     lag = p["master_repl_offset_b"] - r["slave_repl_offset_b"]
     lag_a = p["master_repl_offset_a"] - r["slave_repl_offset_a"]
     p["write_kcmd_s"] = p["set_kcmd_s"]
@@ -608,7 +641,7 @@ def build_record(cell: ReplCell, b: ReplBin, rep: int, roles: dict, pm: dict, rm
         "reader": ({**gens["reader"], "cores": gen_cores.get("reader")} if "reader" in gens else None),
         "preader": ({**gens["preader"], "cores": gen_cores.get("preader")} if "preader" in gens else None),
         "gen_ena": gen_ena,
-        "rgen_ena": {k: rgm["b"]["ena"][k] - rgm["a"]["ena"][k] for k in ALLOWANCE_FIELDS} if rgm else None,
+        "rgen_ena": {k: sum(ena(m)[k] for m in rgms) for k in ALLOWANCE_FIELDS} if rgms else None,
         "repl_lag_bytes_a": lag_a,
         "repl_lag_bytes_b": lag,
         # Lag growth over the window; ~0 means the replica applies writes as fast as they arrive.
@@ -688,11 +721,13 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
 
     wait_for("replica link", lambda: ssh.call(R, {"action": "status", "acl": acl}).get("master_link_status") == "up", 30)
     gen = {"keys": cell.keys, "value_size": cell.value_size, "acl": cell.acl, "window_s": window_s}
-    # Replica readers run on their own host when one is given (--reader-gen); the rest on the generator host.
-    RG = roles.get("rgen")
-    own = RG is not None
+    # Replica readers run on their own host or hosts when given (--reader-gen), with the connections split
+    # evenly; the rest on the generator host.
+    RGs = [roles[k] for k in reader_keys(roles)]
+    own = bool(RGs)
     g_gens = [g for g in cell.gens if not (own and g == "reader")]
-    rg_gens = [g for g in cell.gens if own and g == "reader"]
+    readers = [(h, n) for h, n in zip(RGs, split_conns(cell.conns, len(RGs))) if n] if own else []
+    reader_cap = cell.cpus("reader", own)[1]
     # cachecannon needs at least one connection per thread
     if not ssh.call(G, {"action": "gen_start", "name": "writer", "workload": "set", "target_ip": P.ip,
                         "pipeline": cell.w_pipeline, "conns": cell.w_conns, "prefill": True,
@@ -701,12 +736,12 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
         raise CellError("writer did not start")
     wait_for("replica prefill", lambda: ssh.call(R, {"action": "status", "acl": acl})["dbsize"] >= cell.keys, 60)
     rt = P if cell.read_target == "primary" else R
-    if cell.conns and not ssh.call(RG or G, {"action": "gen_start", "name": "reader", "workload": "get", "target_ip": rt.ip,
-                                             "pipeline": cell.pipeline, "conns": cell.conns, "prefill": False,
-                                             "cpus": cell.cpus("reader", own)[0],
-                                             "threads": cell.threads("reader", own),
-                                             "duration_s": 200, **gen})["alive"]:
-        raise CellError("reader did not start")
+    for h, n in readers or ([(G, cell.conns)] if cell.conns else []):
+        if not ssh.call(h, {"action": "gen_start", "name": "reader", "workload": "get", "target_ip": rt.ip,
+                            "pipeline": cell.pipeline, "conns": n, "prefill": False,
+                            "cpus": cell.cpus("reader", own)[0], "threads": min(reader_cap, n),
+                            "duration_s": 200, **gen})["alive"]:
+            raise CellError(f"reader did not start on {h.name}")
     if cell.p_conns and not ssh.call(G, {"action": "gen_start", "name": "preader", "workload": "get", "target_ip": P.ip,
                                          "pipeline": cell.pp_pipeline, "conns": cell.p_conns, "prefill": False,
                                          "cpus": cell.cpus("preader", own)[0],
@@ -716,8 +751,8 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
 
     def ready() -> bool:
         alive = ssh.call(G, {"action": "gen_alive", "gens": g_gens})
-        if rg_gens:
-            alive.update(ssh.call(RG, {"action": "gen_alive", "gens": rg_gens}))
+        for h, _ in readers:
+            alive[f"reader@{h.name}"] = ssh.call(h, {"action": "gen_alive", "gens": ["reader"]})["reader"]
         if not all(alive.values()):
             raise CellError(f"generator exited before gate: {alive}")
         ps, rs = ssh.call(P, {"action": "status", "acl": acl}), ssh.call(R, {"action": "status", "acl": acl})
@@ -731,7 +766,7 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
         """All hosts snapshot at the same absolute time; every started call is drained before reporting."""
         at = time.time() + lead
         calls = [(P, {"server": True, "pid": pp["pid"], "acl": acl}), (R, {"server": True, "pid": rp["pid"], "acl": acl}),
-                 (G, {"gens": g_gens})] + ([(RG, {"gens": rg_gens})] if rg_gens else [])
+                 (G, {"gens": g_gens})] + [(h, {"gens": ["reader"]}) for h, _ in readers]
         waits = [ssh.start(h, {"action": "measure", "at": at, "window_s": window_s, **extra}) for h, extra in calls]
         out, err = [], None
         for w in waits:
@@ -742,26 +777,47 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
                 out.append(None)
         if err:
             raise err
-        return out + [None] * (4 - len(out))
+        return out
 
     try:
-        pm, rm, gm, rgm = measure_window(2.5)
+        pm, rm, gm, *rgms = measure_window(2.5)
     except CellError as e:
         # A host whose ssh session starts late misses the shared start time; open a new window with more lead.
         if "already passed" not in str(e):
             raise
         log(f"measure start missed ({e}); retrying the window with a 10 s lead")
-        pm, rm, gm, rgm = measure_window(10.0)
+        pm, rm, gm, *rgms = measure_window(10.0)
     time.sleep(1.2)
     stop = {"w_a": max(pm["a"]["t"], rm["a"]["t"]), "w_b": min(pm["b"]["t"], rm["b"]["t"])}
     gens = ssh.call(G, {"action": "gen_stop", "gens": g_gens, **stop})
-    if rg_gens:
-        gens.update(ssh.call(RG, {"action": "gen_stop", "gens": rg_gens, **stop}))
     for g in gens:
         gens[g]["threads"] = cell.threads(g, own)
+    parts = [{**ssh.call(h, {"action": "gen_stop", "gens": ["reader"], **stop})["reader"],
+              "host": h.name, "conns": n, "threads": min(reader_cap, n)} for h, n in readers]
+    if len(parts) == 1:
+        gens["reader"] = {k: v for k, v in parts[0].items() if k not in ("host", "conns")}
+    elif parts:
+        gens["reader"] = merge_readers(parts)
+    for g in gens.values():
+        g.pop("samples", None)
     stops = {"primary": ssh.call(P, {"action": "server_stop", "role": "primary", "server": b.server}),
              "replica": ssh.call(R, {"action": "server_stop", "role": "replica", "server": b.server})}
-    return build_record(cell, b, rep, roles, pm, rm, gm, gens, stops, window_s, run_id, rgm=rgm)
+    return build_record(cell, b, rep, roles, pm, rm, gm, gens, stops, window_s, run_id, rgms=rgms)
+
+
+def merge_readers(parts: list[dict]) -> dict:
+    """One replica-reader result from generators on several hosts. Latency is merged from their window samples
+    by the same rule as one host's generators; err_pct is the worst host's."""
+    timeouts = [p["timeouts"] for p in parts if p.get("timeouts") is not None]
+    errs = [p["err_pct"] for p in parts if p.get("err_pct") is not None]
+    keep = ("host", "conns", "threads", "alive_at_stop", "timeouts", "err_pct", "err_tail", "latency")
+    return {"alive_at_stop": all(p.get("alive_at_stop") for p in parts),
+            "latency": asdict(latency_from_window([s for p in parts for s in p.get("samples") or []])),
+            "timeouts": sum(timeouts) if timeouts else None,
+            "err_pct": max(errs) if errs else None,
+            "err_tail": next((p["err_tail"] for p in parts if p.get("err_tail")), ""),
+            "threads": sum(p["threads"] for p in parts),
+            "parts": [{k: p.get(k) for k in keep} for p in parts]}
 
 
 def cleanup(ssh: Ssh, roles: dict, all_servers: list[str]) -> None:
