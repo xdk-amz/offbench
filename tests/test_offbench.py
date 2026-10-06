@@ -943,6 +943,21 @@ def test_repl_reader_roles_and_connection_split():
     assert repl.split_conns(101, 2) == [51, 50] and repl.split_conns(1, 2) == [1, 0]
 
 
+def test_repl_merged_readers_use_only_seconds_every_host_reported():
+    """Hosts emit their per-second samples at different phases, so the window's edge seconds can hold one
+    host's sample alone; counting them would halve the rate there and skew the percentiles."""
+    from offbench import repl
+
+    def part(host, phase, first, p99):
+        rows = [{"t": s + phase, "p50_us": 1, "p90_us": 1, "p99_us": p99, "p999_us": 1, "p9999_us": 1,
+                 "max_us": 9, "req_s": 1e6} for s in range(first, first + 5)]
+        return {"host": host, "conns": 1, "threads": 1, "alive_at_stop": True, "timeouts": 0, "err_pct": 0.0,
+                "err_tail": "", "latency": None, "samples": rows}
+    g = repl.merge_readers([part("a", 0.9, 1, 100), part("b", 0.3, 2, 300)])
+    assert g["latency"]["samples"] == 4 and g["latency"]["gen_kreq_s"] == 2000.0
+    assert g["latency"]["p99_us"] == 200 and g["threads"] == 2 and [p["host"] for p in g["parts"]] == ["a", "b"]
+
+
 class _ReaderHostsSsh:
     """run_one's host side: primary P, replica R, generator G and replica-reader hosts named in ticks (cores
     each reader host's generator uses)."""

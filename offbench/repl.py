@@ -807,12 +807,14 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
 
 def merge_readers(parts: list[dict]) -> dict:
     """One replica-reader result from generators on several hosts. Latency is merged from their window samples
-    by the same rule as one host's generators; err_pct is the worst host's."""
+    by the same rule as one host's generators, over the seconds every host reported; err_pct is the worst
+    host's."""
     timeouts = [p["timeouts"] for p in parts if p.get("timeouts") is not None]
     errs = [p["err_pct"] for p in parts if p.get("err_pct") is not None]
     keep = ("host", "conns", "threads", "alive_at_stop", "timeouts", "err_pct", "err_tail", "latency")
+    samples = [dict(s, src=p["host"]) for p in parts for s in p.get("samples") or []]
     return {"alive_at_stop": all(p.get("alive_at_stop") for p in parts),
-            "latency": asdict(latency_from_window([s for p in parts for s in p.get("samples") or []])),
+            "latency": asdict(latency_from_window(samples)),
             "timeouts": sum(timeouts) if timeouts else None,
             "err_pct": max(errs) if errs else None,
             "err_tail": next((p["err_tail"] for p in parts if p.get("err_tail")), ""),

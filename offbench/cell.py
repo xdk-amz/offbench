@@ -234,11 +234,15 @@ def window_samples(files: list[Path], w_a: float, w_b: float) -> list[dict]:
 
 def latency_from_window(samples: list[dict]) -> Latency:
     """Same rule as rig/cclat.py: per second, the median of each percentile across generators, the max of their
-    maxima and the sum of their rates; then the median across seconds and the max of maxima. Generators on
-    several hosts merge the same way, since the hosts are chrony-synced."""
+    maxima and the sum of their rates; then the median across seconds and the max of maxima. Samples tagged
+    with a src (one per host) merge only over the seconds every src reported: hosts emit at different phases,
+    so an edge second can hold one host's sample alone."""
     by_sec: dict[int, list[dict]] = {}
     for s in samples:
         by_sec.setdefault(int(s["t"]), []).append(s)
+    srcs = {s.get("src") for s in samples}
+    if len(srcs) > 1:
+        by_sec = {k: ss for k, ss in by_sec.items() if {s.get("src") for s in ss} == srcs} or by_sec
     if not by_sec:
         return Latency(samples=0)
     rows = []
