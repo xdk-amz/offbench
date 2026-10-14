@@ -3,4 +3,5 @@ __pycache__/
 .pytest_cache/
 data/
 dash/data/
+dash/replica/data/
 vendor/cachecannon/target/

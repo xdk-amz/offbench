@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>offbench · replica read capacity</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --ob-bg: var(--bg, #0f1115);
+    --ob-bg-elevated: var(--bg-elevated, #14171d);
+    --ob-card: var(--card, #171a21);
+    --ob-card-fg: var(--card-fg, #e6e6e6);
+    --ob-text: var(--text, #e6e6e6);
+    --ob-text-strong: var(--text-strong, #ffffff);
+    --ob-muted: var(--muted, #8b93a7);
+    --ob-border: var(--border, #2a2f3a);
+    --ob-accent: var(--accent, #6ea8fe);
+    --ob-danger: var(--danger, #f85149);
+    --ob-warn: var(--warn, #d29922);
+    --ob-warn-subtle: var(--warn-subtle, rgba(210,153,34,.15));
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--ob-bg); color: var(--ob-text); }
+  .top { position: sticky; top: 0; z-index: 2; background: var(--ob-bg-elevated); border-bottom: 1px solid var(--ob-border); }
+  header { display: flex; align-items: baseline; gap: 18px; padding: 12px 22px 8px; }
+  header h1 { margin: 0; font-size: 17px; font-weight: 650; color: var(--ob-text-strong); }
+  header a { color: var(--ob-accent); text-decoration: none; font-size: 12px; }
+  header a:hover { text-decoration: underline; }
+  main { padding: 18px 22px 60px; max-width: 1500px; margin: 0 auto; }
+  section { margin-bottom: 28px; }
+  h2 { font-size: 14px; font-weight: 650; margin: 0 0 4px; color: var(--ob-text-strong); }
+  .sub { color: var(--ob-muted); font-size: 12px; margin-bottom: 10px; max-width: 1100px; }
+  .card { background: var(--ob-card); color: var(--ob-card-fg); border: 1px solid var(--ob-border); border-radius: 10px; padding: 12px 14px; min-width: 0; overflow-x: auto; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .grid2.wide { grid-template-columns: 1fr; }
+  @media (max-width: 1100px) { .grid2 { grid-template-columns: 1fr; } }
+  .controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; padding: 6px 22px 10px; border-top: 1px solid var(--ob-border); }
+  .controls .g { display: flex; align-items: center; gap: 6px; }
+  .controls .g span { color: var(--ob-muted); font-size: 12px; }
+  .controls.inline { padding: 0 0 10px; border-top: 0; }
+  .seg { display: inline-flex; border: 1px solid var(--ob-border); border-radius: 6px; overflow: hidden; }
+  .seg button { background: var(--ob-bg); color: var(--ob-text); border: 0; border-right: 1px solid var(--ob-border); padding: 4px 10px; font: inherit; cursor: pointer; }
+  .seg button:last-child { border-right: 0; }
+  .seg button.on { background: var(--ob-accent); color: var(--ob-bg); font-weight: 650; }
+  .seg button:disabled { color: var(--ob-muted); cursor: default; opacity: .55; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { padding: 5px 8px; border-bottom: 1px solid var(--ob-border); text-align: right; white-space: nowrap; }
+  th { color: var(--ob-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .3px; }
+  th .u { text-transform: none; }
+  td:first-child, th:first-child { text-align: left; }
+  td.text, th.text { text-align: left; white-space: normal; }
+  td.delta { font-weight: 650; }
+  tr.grp td { color: var(--ob-text-strong); font-weight: 650; padding-top: 12px; border-bottom-color: transparent; }
+  tr.grp td .mut { font-weight: 400; }
+  tr.oos td { color: var(--ob-muted); }
+  .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .pill { display: inline-block; padding: 0 7px; border-radius: 999px; font-size: 10.5px; font-weight: 650; border: 1px solid var(--ob-border); margin-left: 6px; color: var(--ob-muted); }
+  .pill.behind { color: var(--ob-danger); border-color: var(--ob-danger); }
+  .pill.flag { color: var(--ob-warn); border-color: var(--ob-warn); background: var(--ob-warn-subtle); }
+  .mut { color: var(--ob-muted); }
+  .chart { position: relative; height: 300px; }
+  .chart.short { position: relative; height: 240px; }
+  .empty { color: var(--ob-muted); font-style: italic; padding: 10px 0; }
+</style>
+</head>
+<body>
+<div class="top">
+<header>
+  <h1>offbench · replica read capacity</h1>
+  <a href="../">throughput compare</a>
+</header>
+<div class="controls">
+  <div class="g"><span>cores per server</span><div class="seg" id="cCores"></div></div>
+  <div class="g" id="gRun"><span>run</span><div class="seg" id="cRun"></div></div>
+  <div class="g"><span>latency</span><div class="seg" id="cLat"></div></div>
+</div>
+</div>
+<main>
+
+<section id="capacity">
+  <h2 id="capTitle">Replica read capacity</h2>
+  <div class="sub" id="capSub"></div>
+  <div class="grid2 wide">
+    <div class="card"><div class="chart short"><canvas id="capChart"></canvas></div></div>
+    <div class="card"><div id="capTable"></div></div>
+  </div>
+</section>
+
+<section id="curve">
+  <h2>Replica reads and latency</h2>
+  <div class="sub">One point per load step where the replica kept up in every rep (medians over the reps), joined in order of offered read load. ✕: the next step up fell behind. ▷: a lower bound, reads were still rising or the readers' generator ran out of cores. Hollow: in sync again above a step that fell behind; it does not count. Latency is the replica readers' request latency, from cachecannon.</div>
+  <div class="card"><div class="chart"><canvas id="curveChart"></canvas></div></div>
+</section>
+
+<section id="latency">
+  <h2 id="latTitle">Latency at this scenario</h2>
+  <div class="sub" id="latSub"></div>
+  <div class="controls inline">
+    <div class="g"><span>replica reader conns</span><div class="seg" id="cLatStep"></div></div>
+    <div class="g"><span>latency of</span><div class="seg" id="cLatGen"></div></div>
+  </div>
+  <div class="grid2 wide">
+    <div class="card"><div class="chart short"><canvas id="latChart"></canvas></div></div>
+    <div class="card"><div id="latTable"></div></div>
+  </div>
+</section>
+
+<section id="scaling">
+  <h2>By cores per server</h2>
+  <div class="sub">The latest run at each core count. Calibration sets X and Y per core count from the slowest primary at the reference load, so they differ between columns.</div>
+  <div class="grid2">
+    <div class="card"><div class="chart short"><canvas id="scaleChart"></canvas></div></div>
+    <div class="card"><div id="scaleTable"></div></div>
+  </div>
+</section>
+
+<section id="steps">
+  <h2>Load steps</h2>
+  <div class="sub" id="stepSub"></div>
+  <div class="card"><div id="stepTable"></div></div>
+</section>
+
+</main>
+<script>
+const css = (v, fb) => (getComputedStyle(document.documentElement).getPropertyValue(v).trim() || fb);
+const C = { text: css('--text', '#e6e6e6'), muted: css('--muted', '#8b93a7'), border: css('--border', '#2a2f3a'), danger: css('--danger', '#f85149') };
+const BUILD_COLORS = ['#9aa4b5', '#6ea8fe', '#c678dd', '#e5c07b', '#3fb950', '#56b6c2', '#f85149'];
+Chart.defaults.color = C.text; Chart.defaults.borderColor = C.border; Chart.defaults.font.size = 11;
+Chart.defaults.plugins.legend.labels.boxWidth = 10;
+Chart.defaults.animation = false;
+
+const $ = id => document.getElementById(id);
+const charts = {};
+function mkChart(id, cfg) { if (charts[id]) charts[id].destroy(); charts[id] = new Chart($(id), cfg); }
+function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; }
+function deltaColor(d) { if (d == null) return ''; const a = Math.min(Math.abs(d), 100) / 100; return d >= 0 ? `rgba(63,185,80,${0.12 + a * 0.68})` : `rgba(248,81,73,${0.12 + a * 0.68})`; }
+// k/s as 782k or 6.85M, as repl-capacity prints them
+const fmtRate = k => k == null ? '–' : k >= 999.5 ? (k / 1000).toFixed(2) + 'M' : Math.round(k) + 'k';
+const fmtUs = v => v == null ? '–' : Math.round(v).toLocaleString();
+const fmtP = d => (d > 0 ? '+' : '') + d.toFixed(0) + '%';
+const capText = c => c ? (c.at_least ? '≥ ' : '') + fmtRate(c.read) : 'none';
+const LAT = { p50_us: 'p50', p99_us: 'p99', p999_us: 'p99.9' };
+// Latency at this scenario: [field, label, bar alpha], and per client [name, rate column, main column, rate, main].
+const PCT = [['p50_us', 'p50', 0.95], ['p90_us', 'p90', 0.8], ['p99_us', 'p99', 0.65], ['p999_us', 'p99.9', 0.5],
+             ['p9999_us', 'p99.99', 0.35], ['max_us', 'max', 0.2]];
+const GEN = { lat: ['replica readers', 'replica reads/s', 'replica main', s => s.read, s => s.replica_main],
+              writer_lat: ['writers', 'writes/s', 'primary main', s => s.x, s => s.primary_main],
+              primary_reader_lat: ['primary readers', 'primary reads/s', 'primary main', s => s.y, s => s.primary_main] };
+
+// Ticks for bar charts: dataset.range = [lo, hi] per bar, drawn as a whisker.
+const whiskers = { id: 'whiskers', afterDatasetsDraw(chart) {
+  const { ctx } = chart;
+  chart.data.datasets.forEach((ds, di) => {
+    if (!ds.range) return;
+    const meta = chart.getDatasetMeta(di); if (meta.hidden) return;
+    meta.data.forEach((bar, i) => {
+      const r = ds.range[i]; if (ds.data[i] == null || !r) return;
+      const y0 = chart.scales.y.getPixelForValue(r[0]), y1 = chart.scales.y.getPixelForValue(r[1]);
+      const hw = Math.max(3, Math.min(6, (bar.width || 12) * 0.35));
+      ctx.save(); ctx.strokeStyle = C.text; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(bar.x, y0); ctx.lineTo(bar.x, y1); ctx.moveTo(bar.x - hw, y0); ctx.lineTo(bar.x + hw, y0); ctx.moveTo(bar.x - hw, y1); ctx.lineTo(bar.x + hw, y1); ctx.stroke(); ctx.restore();
+    });
+  });
+}};
+
+let D;
+const S = { cores: null, run: null, lat: 'p99_us', latStep: null, latGen: 'lat' };
+const buildIdx = id => D.builds.findIndex(b => b.id === id);
+const buildOf = id => D.builds[buildIdx(id)] || { id, label: id, commit: '' };
+const color = (id, a = 0.95) => hexA(BUILD_COLORS[Math.max(0, buildIdx(id)) % BUILD_COLORS.length], a);
+const runsAt = c => D.runs.filter(r => r.cores === c);
+const latestAt = c => runsAt(c).slice(-1)[0];
+const curRun = () => runsAt(S.cores).find(r => r.id === S.run) || latestAt(S.cores);
+const stepAt = (sw, n) => sw.steps.find(s => s.readers === n);
+const when = r => r.first_ts ? `${r.first_ts.slice(0, 10)} ${r.first_ts.slice(11, 16)}-${(r.last_ts || '').slice(11, 16)} UTC` : 'undated';
+
+// What the replica did when offered more reads than its capacity: the load steps are in the step table.
+function moreText(sw) {
+  const o = sw.outcome;
+  switch (o.kind) {
+    case 'levels-off': return 'stays in sync; reads level off';
+    case 'rising':
+    case 'not-reached': return 'stays in sync; limit not reached';
+    case 'falls-out': return 'falls out of sync';
+    case 'unstable': return 'falls out of sync in some reps';
+    default:
+      if (o.first_behind == null) return 'no valid step';
+      return sw.steps.some(s => s.role === 'again') ? 'falls out of sync in some reps' : 'out of sync at every load';
+  }
+}
+// Δ against the reference build's capacity. A lower bound on this build makes Δ a floor, one on the
+// reference makes it a ceiling, and with both it is unknown.
+function capDelta(c, r) {
+  if (!c || !r) return null;
+  if (c.at_least && r.at_least) return { d: null, txt: '?', tip: 'both are lower bounds' };
+  const d = (c.read / r.read - 1) * 100;
+  return { d, txt: (c.at_least ? '≥ ' : r.at_least ? '≤ ' : '') + fmtP(d),
+           tip: c.at_least ? 'this build\'s capacity is a lower bound' : r.at_least ? 'the reference\'s capacity is a lower bound' : '' };
+}
+
+const barLabels = { id: 'barLabels', afterDatasetsDraw(chart) {
+  const ds = chart.data.datasets[0]; if (!ds || !ds.labels) return;
+  const { ctx } = chart, meta = chart.getDatasetMeta(0), y0 = chart.scales.y.getPixelForValue(0);
+  ctx.save(); ctx.fillStyle = C.text; ctx.font = '650 11px ui-sans-serif, system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  meta.data.forEach((bar, i) => { if (ds.labels[i]) ctx.fillText(ds.labels[i], bar.x, ds.data[i] == null ? y0 - 3 : bar.y - 4); });
+  ctx.restore();
+}};
+
+function seg(id, items, isOn, fmt, onPick, disabled = () => false, tip = () => '') {
+  const el = $(id);
+  el.innerHTML = items.map((v, i) => `<button data-i="${i}" class="${isOn(v) ? 'on' : ''}" ${disabled(v) ? 'disabled' : ''} title="${tip(v)}">${fmt(v)}</button>`).join('');
+  el.querySelectorAll('button').forEach(b => b.onclick = () => { onPick(items[+b.dataset.i]); controls(); render(); });
+}
+
+function controls() {
+  seg('cCores', D.cores, c => c === S.cores, String, c => { S.cores = c; S.run = null; }, c => !runsAt(c).length, c => runsAt(c).length ? '' : 'not measured yet');
+  const rs = runsAt(S.cores), cur = curRun();
+  $('gRun').style.display = rs.length > 1 ? '' : 'none';
+  seg('cRun', rs, r => cur && r.id === cur.id, r => r.first_ts ? r.first_ts.slice(0, 10) : r.id, r => { S.run = r.id; });
+  seg('cLat', Object.keys(LAT), k => k === S.lat, k => LAT[k], k => { S.lat = k; });
+}
+
+function renderCapacity(run) {
+  const t = run.targets, ref = run.sweeps.find(sw => sw.build === D.ref);
+  $('capTitle').textContent = `Replica read capacity · ${run.cores} cores per server`;
+  $('capSub').innerHTML = (t ? `Every build's primary ran at the same <b>${fmtRate(t.x)} writes/s</b> (X) and <b>${fmtRate(t.y)} reads/s</b> (Y); a rep more than ${Math.round(t.tol * 100)}% off either is invalid. `
+      : 'This run recorded no X and Y targets, so drift was not checked. ') +
+    `The capacity is the most replica reads/s over load steps where the replica kept up with every write in every rep, below the first step where it fell behind. ≥ marks a lower bound. Δ is against ${ref ? buildOf(ref.build).label : D.ref}.`;
+  $('capTable').innerHTML = `<table><thead><tr><th>build</th><th>commit</th><th>writes/s (X)</th><th>primary reads/s (Y)</th><th>replica reads/s in sync</th><th>Δ</th><th class="text">when offered more reads</th></tr></thead><tbody>` +
+    run.sweeps.map(sw => {
+      const b = buildOf(sw.build), d = sw === ref ? null : capDelta(sw.capacity, ref && ref.capacity);
+      return `<tr><td><span class="sw" style="background:${color(sw.build)}"></span>${b.label}${b.note ? `<div class="mut" style="margin-left:15px;font-size:11px">${b.note}</div>` : ''}</td>
+        <td class="mut">${b.commit}</td><td>${fmtRate(sw.x)}</td><td>${fmtRate(sw.y)}</td>
+        <td style="font-weight:650">${capText(sw.capacity)}</td>
+        <td class="delta" style="background:${d ? deltaColor(d.d) : ''}" title="${d && d.tip ? d.tip : ''}">${d ? d.txt : '–'}</td>
+        <td class="text">${moreText(sw)}</td></tr>`;
+    }).join('') + '</tbody></table>';
+  mkChart('capChart', {
+    type: 'bar', plugins: [barLabels],
+    data: { labels: run.sweeps.map(sw => buildOf(sw.build).label),
+      datasets: [{ data: run.sweeps.map(sw => sw.capacity ? sw.capacity.read / 1000 : null), labels: run.sweeps.map(sw => capText(sw.capacity)),
+        backgroundColor: run.sweeps.map(sw => color(sw.build, sw.capacity && sw.capacity.at_least ? 0.25 : 0.95)),
+        borderColor: run.sweeps.map(sw => color(sw.build)), borderWidth: run.sweeps.map(sw => sw.capacity && sw.capacity.at_least ? 1.5 : 0) }] },
+    options: { maintainAspectRatio: false, layout: { padding: { top: 18 } },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => { const sw = run.sweeps[ctx.dataIndex]; return `${capText(sw.capacity)} replica reads/s in sync · ${moreText(sw)}`; } } } },
+      scales: { y: { beginAtZero: true, title: { display: true, text: 'M replica reads/s' } }, x: { ticks: { autoSkip: false } } } }
+  });
+}
+
+function renderCurve(run) {
+  const L = S.lat, pt = s => ({ x: s.read / 1000, y: s.lat ? s.lat[L] : null, s }), ds = [];
+  for (const sw of run.sweeps) {
+    const id = sw.build, label = buildOf(id).label, o = sw.outcome;
+    ds.push({ kind: 'curve', label, data: sw.steps.filter(s => s.role === 'curve').map(pt), showLine: true,
+      borderColor: color(id), backgroundColor: color(id), pointRadius: 4, pointHoverRadius: 6, borderWidth: 2 });
+    const again = sw.steps.filter(s => s.role === 'again');
+    if (again.length) ds.push({ kind: 'again', label, data: again.map(pt), showLine: false, pointRadius: 5, pointHoverRadius: 7,
+      pointBackgroundColor: 'transparent', borderColor: color(id), borderWidth: 1.5 });
+    if (o.first_behind != null && o.last != null) {
+      const last = stepAt(sw, o.last);
+      ds.push({ kind: 'behind', label, data: [{ ...pt(last), s: stepAt(sw, o.first_behind) }], showLine: false, pointStyle: 'crossRot',
+        pointRadius: 9, pointHoverRadius: 10, borderColor: C.danger, borderWidth: 2 });
+    } else if (sw.capacity && sw.capacity.at_least) {
+      ds.push({ kind: 'bound', label, why: o.kind, data: [pt(stepAt(sw, sw.capacity.readers))], showLine: false, pointStyle: 'triangle',
+        rotation: 90, pointRadius: 8, pointHoverRadius: 9, backgroundColor: color(id), borderColor: color(id) });
+    }
+  }
+  const tip = ctx => {
+    const d = ctx.dataset, s = ctx.raw.s;
+    if (d.kind === 'behind') return `${d.label}: the next step up (${s.readers} reader conns) fell behind in ${s.behind}/${s.n} reps`;
+    if (d.kind === 'bound') return `${d.label}: lower bound, ${d.why === 'not-reached' ? 'the readers\' generator ran out of cores' : 'reads still rising'}`;
+    return `${d.label}: ${fmtRate(s.read)} reads/s, ${LAT[L]} ${fmtUs(ctx.raw.y)} µs (${s.readers} reader conns)` + (d.kind === 'again' ? ', in sync above a step that fell behind: not counted' : '');
+  };
+  mkChart('curveChart', {
+    type: 'scatter', data: { datasets: ds },
+    options: { maintainAspectRatio: false,
+      plugins: { legend: { position: 'bottom', labels: { filter: (item, data) => data.datasets[item.datasetIndex].kind === 'curve' } },
+        tooltip: { callbacks: { label: tip } } },
+      scales: { x: { beginAtZero: true, title: { display: true, text: 'M replica reads/s' } },
+        y: { type: 'logarithmic', title: { display: true, text: `replica reader ${LAT[L]} latency, µs (log)` } } } }
+  });
+}
+
+function renderScaling() {
+  const latest = D.cores.map(latestAt), ids = D.builds.map(b => b.id);
+  const capOf = (r, id) => { const sw = r && r.sweeps.find(x => x.build === id); return sw ? { sw } : null; };
+  $('scaleTable').innerHTML = `<table><thead><tr><th>build</th>${D.cores.map(c => `<th>${c} cores</th>`).join('')}</tr></thead><tbody>` +
+    `<tr><td class="mut">primary X / Y</td>${latest.map(r => `<td class="mut">${r && r.targets ? `${fmtRate(r.targets.x)} / ${fmtRate(r.targets.y)}` : '–'}</td>`).join('')}</tr>` +
+    ids.map(id => `<tr><td><span class="sw" style="background:${color(id)}"></span>${buildOf(id).label}</td>` +
+      latest.map(r => { const c = capOf(r, id); return `<td style="font-weight:650">${c ? capText(c.sw.capacity) : '<span class="mut">–</span>'}</td>`; }).join('') + '</tr>').join('') +
+    '</tbody></table>' + (latest.filter(Boolean).length < 2 ? '<div class="empty">One core count measured so far.</div>' : '');
+  mkChart('scaleChart', {
+    type: 'line',
+    data: { labels: D.cores.map(c => `${c} cores`),
+      datasets: ids.map(id => { const caps = latest.map(r => { const c = capOf(r, id); return c ? c.sw.capacity : null; });
+        return { label: buildOf(id).label, data: caps.map(c => c ? c.read / 1000 : null), caps, borderColor: color(id), backgroundColor: color(id),
+          pointBackgroundColor: caps.map(c => c && c.at_least ? 'transparent' : color(id)), pointRadius: 5, pointHoverRadius: 7, borderWidth: 2, spanGaps: false }; }) },
+    options: { maintainAspectRatio: false, plugins: { legend: { position: 'bottom' },
+        tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${capText(ctx.dataset.caps[ctx.dataIndex])} replica reads/s in sync` } } },
+      scales: { y: { beginAtZero: true, title: { display: true, text: 'M replica reads/s in sync' } } } }
+  });
+}
+
+function renderSteps(run) {
+  const rtt = run.rtt_ms || {}, ms = v => v == null ? '–' : v.toFixed(3) + ' ms';
+  $('stepSub').innerHTML = `Medians over each step's valid reps; a step where the replica fell behind in any rep has no numbers. Connection counts are parameters: each build's writers and primary readers were calibrated to X and Y, and replica reader connections set the offered read load. RTT: the round trip is over half of each replica read's latency. GEN: the readers' generator ran out of cores. ` +
+    `<br>Run ${when(run)}${run.calibration ? `, calibration ${run.calibration}` : ''}. Round trip (median ping): generator to primary ${ms(rtt.gen_primary)}, readers' generator to replica ${ms(rtt.gen_replica)}, primary to replica ${ms(rtt.primary_replica)}.`;
+  const shape = sw => { const s = sw.shape; return `${s.w}×P${s.wp} writers + ${s.p}×P${s.pp} primary readers`; };
+  $('stepTable').innerHTML = `<table><thead><tr><th>replica reader conns</th><th>valid reps</th><th>writes/s</th><th>primary reads/s</th><th>replica reads/s</th><th>p50 <span class="u">µs</span></th><th>p99 <span class="u">µs</span></th><th>p99.9 <span class="u">µs</span></th><th>replica main · IO cores</th><th class="text">note</th></tr></thead><tbody>` +
+    run.sweeps.map(sw => `<tr class="grp"><td colspan="10"><span class="sw" style="background:${color(sw.build)}"></span>${buildOf(sw.build).label} <span class="mut">· ${shape(sw)}</span></td></tr>` +
+      sw.steps.map(s => {
+        const pills = [];
+        if (s.role === 'behind') pills.push(`<span class="pill behind">fell behind ${s.behind}/${s.n}</span>`);
+        else if (s.role === 'invalid') pills.push(`<span class="pill">invalid</span> <span class="mut">${s.note.replace(/^invalid: /, '')}</span>`);
+        else {
+          for (const f of ['RTT', 'GEN']) if (s.note.split(', ').includes(f)) pills.push(`<span class="pill flag">${f}</span>`);
+          const other = s.note.split(', ').filter(x => x && x !== 'RTT' && x !== 'GEN');
+          if (other.length) pills.push(`<span class="mut">${other.join(', ')}</span>`);
+          if (s.role === 'again') pills.push('<span class="pill">above a step that fell behind: not counted</span>');
+        }
+        const ok = s.x != null, lat = s.lat || {};
+        return `<tr class="${ok ? '' : 'oos'}"><td>${s.readers || '0 (none)'}</td><td>${s.valid}/${s.n}</td>` +
+          (ok ? `<td>${fmtRate(s.x)}</td><td>${fmtRate(s.y)}</td><td style="font-weight:650">${s.read != null ? fmtRate(s.read) : ''}</td>` +
+                `<td>${fmtUs(lat.p50_us)}</td><td>${fmtUs(lat.p99_us)}</td><td>${fmtUs(lat.p999_us)}</td>` +
+                `<td>${s.replica_main == null ? '–' : s.replica_main.toFixed(0) + '%'} · ${s.replica_io_cores == null ? '–' : s.replica_io_cores.toFixed(1)}</td>`
+              : '<td></td><td></td><td></td><td></td><td></td><td></td><td></td>') +
+          `<td class="text">${pills.join(' ')}</td></tr>`;
+      }).join('')).join('') + '</tbody></table>';
+}
+
+// The load steps of a run, and the one the latency section shows: the picked step if this client has data
+// there, else the highest step where every build kept up, else the lightest step with replica readers.
+const latSteps = run => [...new Set(run.sweeps.flatMap(sw => sw.steps.map(s => s.readers)))].sort((a, b) => a - b);
+function latStep(run) {
+  const steps = latSteps(run).filter(n => n || S.latGen !== 'lat');
+  if (steps.includes(S.latStep)) return S.latStep;
+  const all = steps.filter(n => n && run.sweeps.every(sw => { const s = stepAt(sw, n); return s && s.x != null; }));
+  return all.length ? all[all.length - 1] : (steps.find(n => n) ?? steps[0]);
+}
+
+function renderLatency(run) {
+  const n = latStep(run), [gname, rname, mname, rate, main] = GEN[S.latGen], ref = buildOf(D.ref).label;
+  seg('cLatStep', latSteps(run), v => v === n, v => v ? String(v) : '0 (none)', v => { S.latStep = v; },
+      v => !v && S.latGen === 'lat', v => !v && S.latGen === 'lat' ? 'no replica readers at this step' : '');
+  seg('cLatGen', Object.keys(GEN), k => k === S.latGen, k => GEN[k][0], k => { S.latGen = k; });
+  $('latTitle').textContent = `Latency at this scenario · ${run.cores} cores per server · ${n ? n + ' replica reader conns' : 'no replica readers'}`;
+  $('latSub').innerHTML = `Client-observed request latency from cachecannon (µs), aggregated over the 6 s window: percentiles are the median across valid reps, max is the max across reps. Ticks on each bar mark the lowest and highest rep for that percentile. Every generator is closed loop, so latency is mostly queueing, roughly requests in flight ÷ throughput. ` +
+    `At a load step every build has the same replica reader connections; writers and primary readers have each build's calibrated connection counts (see Load steps), so their latency also reflects those counts. Δ is p99 against ${ref} at the same step. A step where the replica fell behind has no numbers. The selector starts at the highest step where every build kept up.`;
+  const rows = run.sweeps.map(sw => { const s = stepAt(sw, n); return { sw, s, L: s && s[S.latGen] }; });
+  const r0 = rows.find(r => r.sw.build === D.ref), refP99 = r0 && r0.L ? r0.L.p99_us : null;
+  const status = s => !s ? 'not measured at this step' : s.role === 'behind' ? `<span class="pill behind">fell behind ${s.behind}/${s.n}</span>`
+    : s.role === 'invalid' ? `<span class="pill">invalid</span> <span class="mut">${s.note.replace(/^invalid: /, '')}</span>` : 'no latency recorded';
+  $('latTable').innerHTML = `<table><thead><tr><th>build</th><th>${rname}</th><th>${mname}</th>${PCT.map(p => `<th>${p[1]} <span class="u">µs</span></th>`).join('')}<th>Δ p99</th><th>reps</th></tr></thead><tbody>` +
+    rows.map(({ sw, s, L }) => {
+      const head = `<td><span class="sw" style="background:${color(sw.build)}"></span>${buildOf(sw.build).label}</td>`;
+      if (!L) return `<tr class="oos">${head}<td colspan="${PCT.length + 4}" class="text">${status(s)}</td></tr>`;
+      const d = sw.build !== D.ref && refP99 ? (L.p99_us / refP99 - 1) * 100 : null, m = main(s);
+      return `<tr>${head}<td>${fmtRate(rate(s))}</td><td class="mut">${m == null ? '–' : m.toFixed(0) + '%'}</td>` +
+        PCT.map(([f]) => { const r = L.range && L.range[f];
+          return `<td${r ? ` title="reps: ${fmtUs(r[0])} – ${fmtUs(r[1])} µs"` : ''}${f === 'p99_us' ? ' style="font-weight:650"' : ''}>${fmtUs(L[f])}</td>`; }).join('') +
+        `<td class="delta" style="background:${deltaColor(d == null ? null : -d)}">${d == null ? '–' : fmtP(d)}</td><td class="mut">${L.n}/${s.n}</td></tr>`;
+    }).join('') + '</tbody></table>';
+  const have = rows.filter(r => r.L);
+  mkChart('latChart', {
+    type: 'bar', plugins: [whiskers],
+    data: { labels: have.map(r => buildOf(r.sw.build).label),
+      datasets: PCT.map(([f, name, a]) => ({ label: name, data: have.map(r => r.L[f]),
+        range: have.map(r => r.L.range && r.L.range[f] ? r.L.range[f] : null),
+        backgroundColor: have.map(r => color(r.sw.build, a)), borderColor: have.map(r => color(r.sw.build)), borderWidth: 1 })) },
+    options: { maintainAspectRatio: false,
+      plugins: { legend: { position: 'bottom' },
+        tooltip: { callbacks: { label: ctx => { const r = ctx.dataset.range && ctx.dataset.range[ctx.dataIndex]; return `${ctx.dataset.label}: ${fmtUs(ctx.raw)} µs` + (r ? ` (reps ${fmtUs(r[0])} – ${fmtUs(r[1])})` : ''); } } } },
+      scales: { y: { type: 'logarithmic', title: { display: true, text: `${gname} latency, µs (log)` } }, x: { ticks: { autoSkip: false, maxRotation: 30 } } } }
+  });
+}
+
+function render() {
+  const run = curRun();
+  if (!run) { $('capTable').innerHTML = '<div class="empty">no run at this core count yet</div>'; return; }
+  renderCapacity(run); renderCurve(run); renderLatency(run); renderScaling(); renderSteps(run);
+}
+
+function init(data) {
+  D = data;
+  if (!D.runs.length) { $('capTable').innerHTML = '<div class="empty">no runs exported yet</div>'; return; }
+  S.cores = D.runs[D.runs.length - 1].cores;
+  controls(); render();
+}
+if (window.OFFBENCH_REPL) init(window.OFFBENCH_REPL);
+else fetch('data/replica.json?ts=' + Date.now()).then(r => r.json()).then(init).catch(e => { $('capTable').innerHTML = '<div class="empty">failed to load data/replica.json: ' + e + '</div>'; });
+</script>
+</body>
+</html>

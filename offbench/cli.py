@@ -6,6 +6,7 @@
   offbench backfill <logdir>          parse existing cccell/metalcell logs into results.jsonl
   offbench compare <binA> <binB>      Welch table (+ acceptance/invariance) from results.jsonl
   offbench export                     write dash/data/dashboard.json
+  offbench export-repl                write dash/replica/data/replica.json (runs listed in repl_view.json)
   offbench publish                    export, then commit + push dash/ into the ratatoskr view-model repo
   offbench serve [--port 8765]        dashboard on 127.0.0.1
   offbench push <task.json> / sync    move tasks to and results from the rig over ssh
@@ -185,6 +186,21 @@ def cmd_export(a: argparse.Namespace) -> int:
 
 
 PUBLISH_DIR = Path(os.environ.get("OFFBENCH_PUBLISH_DIR", HERE.parent.parent / "ratatoskr"))
+REPL_VIEW = HERE / "repl_view.json"
+REPL_DASH = DASH_DIR / "replica"
+
+
+def cmd_export_repl(a: argparse.Namespace) -> int:
+    from . import replview
+    try:
+        data = replview.build(json.loads(Path(a.registry).read_text()), a.root)
+    except replview.ViewError as e:
+        print(f"{a.registry}: {e}", file=sys.stderr)
+        return 2
+    out = export.write(data, REPL_DASH / "data" / "replica.json")
+    print(f"wrote {out}: {len(data['runs'])} runs, {len(data['builds'])} builds")
+    return 0
+
 LEAK_PATTERNS = (re.compile(r"\bi-[0-9a-f]{17}\b"), re.compile(r"\.pem\b"), re.compile(r"\bec2-user@"))
 
 
@@ -954,6 +970,9 @@ def main(argv=None) -> int:
     e.add_argument("--builds", default=None, help="comma-separated build ids to include (default: all in builds.json)")
     e.add_argument("--io-threads", default=None, help="comma-separated io-thread counts to include (default: all)")
     e.set_defaults(fn=cmd_export)
+    er = sub.add_parser("export-repl", help="write dash/replica/data/replica.json for the replica read capacity page")
+    er.add_argument("--registry", default=str(REPL_VIEW), help="builds and runs to show (default %(default)s)")
+    er.set_defaults(fn=cmd_export_repl)
     pb = sub.add_parser("publish", help="export, then commit the page and data into the view-model repo")
     pb.add_argument("--repo", default=str(PUBLISH_DIR))
     pb.add_argument("--subdir", default="offload")

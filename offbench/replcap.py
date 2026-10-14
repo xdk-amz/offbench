@@ -453,38 +453,73 @@ class Step:
         return ", ".join(tags)
 
 
-def outcome(steps: list) -> tuple[str, str]:
-    """(replica reads/s in sync, what more offered reads did) for one build's sweep.
+@dataclass
+class Outcome:
+    """What one build's sweep showed. top: the in-sync step with the most replica reads below first, the
+    first step where the replica fell behind. last: the highest in-sync step below first. again: in-sync
+    steps above first, which are reported but never counted."""
+    top: Optional[Step]
+    last: Optional[Step]
+    first: Optional[Step]
+    oos: list
+    again: list
+    rising: bool
+    gen: bool
 
-    The rate is the highest over in-sync steps below the first step where the replica fell behind: an in-sync
-    step above that one is reported, but it does not raise the rate."""
+    @property
+    def at_least(self) -> bool:
+        """The rate is a lower bound: reads were still rising, or the readers' generator ran out of cores."""
+        return self.top is not None and (self.rising or self.gen)
+
+    @property
+    def kind(self) -> str:
+        if self.top is None:
+            return "none"
+        if self.gen:
+            return "not-reached"
+        if self.first is None:
+            return "rising" if self.rising else "levels-off"
+        return "unstable" if self.again else "falls-out"
+
+
+def judge(steps: list) -> Outcome:
     load = [s for s in steps if s.readers]
     ins = [s for s in load if s.ok]
     oos = [s for s in load if s.behind]
     first = min(oos, key=lambda s: s.readers) if oos else None
     below = [s for s in ins if first is None or s.readers < first.readers]
-    again = [s.readers for s in ins if first is not None and s.readers > first.readers]
-    unstable = ("unstable: out of sync at " + ", ".join(f"{s.readers} ({s.behind}/{len(s.recs)} fell behind)"
-                                                         for s in oos)
-                + f", in sync at {', '.join(map(str, again))}") if again else ""
+    again = [s for s in ins if first is not None and s.readers > first.readers]
     if not below:
-        if first is None:
-            return "none", "no valid step"
-        return "none", unstable or f"out of sync from {first.readers} readers"
+        return Outcome(None, None, first, oos, again, False, False)
     top = max(below, key=lambda s: s.read)
     i = below.index(top)
     rising = top is below[-1] and (i == 0 or top.read > (1 + RISING) * below[i - 1].read)
-    at = ("at least " if rising else "") + f"{fmt_rate(top.read)} at {top.readers} readers"
-    if gen_flag(top.valid):
-        return f"at least {fmt_rate(top.read)} at {top.readers} readers", \
-            "not reached: the replica readers' generator ran out of cores"
-    if first is None:
-        return at, ("in sync at every step; reads still rising, extend the sweep" if rising
+    return Outcome(top, below[-1], first, oos, again, rising, gen_flag(top.valid))
+
+
+def outcome(steps: list) -> tuple[str, str]:
+    """(replica reads/s in sync, what more offered reads did) for one build's sweep.
+
+    The rate is the highest over in-sync steps below the first step where the replica fell behind: an in-sync
+    step above that one is reported, but it does not raise the rate."""
+    o = judge(steps)
+    unstable = ("unstable: out of sync at " + ", ".join(f"{s.readers} ({s.behind}/{len(s.recs)} fell behind)"
+                                                         for s in o.oos)
+                + f", in sync at {', '.join(str(s.readers) for s in o.again)}") if o.again else ""
+    if o.top is None:
+        if o.first is None:
+            return "none", "no valid step"
+        return "none", unstable or f"out of sync from {o.first.readers} readers"
+    at = ("at least " if o.at_least else "") + f"{fmt_rate(o.top.read)} at {o.top.readers} readers"
+    if o.gen:
+        return at, "not reached: the replica readers' generator ran out of cores"
+    if o.first is None:
+        return at, ("in sync at every step; reads still rising, extend the sweep" if o.rising
                     else "in sync at every step; reads level off")
-    if again:
+    if o.again:
         return at, unstable
-    return at, f"falls out of sync between {below[-1].readers} and {first.readers} readers" + (
-        "" if rising else "; reads had levelled off")
+    return at, f"falls out of sync between {o.last.readers} and {o.first.readers} readers" + (
+        "" if o.rising else "; reads had levelled off")
 
 
 def _sweep_of(recs: list) -> tuple[list, int]:
@@ -497,8 +532,38 @@ def _sweep_of(recs: list) -> tuple[list, int]:
     return pick, len(recs) - len(pick)
 
 
-def report(recs: list, targets: Optional[tuple] = None, order: Optional[list] = None) -> str:
-    """The doc's result table and per-step raw table, per calibration and core count in recs."""
+@dataclass
+class Sweep:
+    """One build's sweep in a run: its primary load, the replica readers' pipeline and the load steps."""
+    bin: dict
+    shape: Shape
+    pipeline: int
+    steps: list
+    skipped: int
+
+    @property
+    def name(self) -> str:
+        return self.bin["name"]
+
+    @property
+    def delivered(self) -> tuple[float, float]:
+        """X and Y as delivered: medians over the sweep's valid reps."""
+        v = [r for s in self.steps for r in s.valid]
+        return _med(delivered(r)[0] for r in v), _med(delivered(r)[1] for r in v)
+
+
+@dataclass
+class Run:
+    """One calibration at one core count: its targets and each build's sweep."""
+    calibration: Optional[str]
+    cores: int
+    targets: Optional[dict]
+    sweeps: list
+    recs: list
+
+
+def runs(recs: list, targets: Optional[tuple] = None, order: Optional[list] = None) -> list:
+    """The sweeps in recs, per calibration and core count. targets: (X, Y) for records that carry none."""
     recs = [dict(r) for r in recs if r.get("kind") == "replrw"]
     if targets:
         for r in recs:
@@ -512,27 +577,36 @@ def report(recs: list, targets: Optional[tuple] = None, order: Optional[list] = 
         groups.setdefault(((r.get("calibration") or {}).get("id"), cores(r)), []).append(r)
     out = []
     for (cal, c), rs in sorted(groups.items(), key=lambda kv: (kv[0][1], str(kv[0][0]))):
-        t = next((r["targets"] for r in rs if r.get("targets")), None)
-        out.append(f"## {c} cores" + (f", calibration {cal}" if cal else ""))
+        sweeps = []
+        for b in [b for b in order if any(r["bin"]["name"] == b for r in rs)]:
+            mine, skipped = _sweep_of([r for r in rs if r["bin"]["name"] == b])
+            steps = [Step(n, [r for r in mine if r["cell"]["conns"] == n])
+                     for n in sorted({r["cell"]["conns"] for r in mine})]
+            sweeps.append(Sweep(mine[0]["bin"], shape_of(mine[0]), mine[0]["cell"]["pipeline"], steps, skipped))
+        out.append(Run(cal, c, next((r["targets"] for r in rs if r.get("targets")), None), sweeps, rs))
+    return out
+
+
+def report(recs: list, targets: Optional[tuple] = None, order: Optional[list] = None) -> str:
+    """The doc's result table and per-step raw table, per calibration and core count in recs."""
+    out = []
+    for run in runs(recs, targets, order):
+        t = run.targets
+        out.append(f"## {run.cores} cores" + (f", calibration {run.calibration}" if run.calibration else ""))
         out.append(f"targets: X {fmt_rate(t['write_kcmd_s'])} writes/s, Y {fmt_rate(t['read_kcmd_s'])} reads/s, "
                    f"reps more than {t.get('tol', repl.DRIFT_TOL):.0%} off are invalid" if t
                    else "no targets recorded: X and Y are as delivered, and drift is not checked")
-        names = [b for b in order if any(r["bin"]["name"] == b for r in rs)]
         res = ["| build | X writes/s | Y reads/s | replica reads/s in sync | more offered reads |",
                "|---|---:|---:|---|---|"]
         raw = ["| build | readers | valid | writes/s | primary reads/s | replica reads/s | reader p99 | note |",
                "|---|---:|---:|---:|---:|---:|---:|---|"]
-        left = 0
-        for b in names:
-            mine, skipped = _sweep_of([r for r in rs if r["bin"]["name"] == b])
-            left += skipped
-            steps = [Step(n, [r for r in mine if r["cell"]["conns"] == n])
-                     for n in sorted({r["cell"]["conns"] for r in mine})]
-            v = [r for s in steps for r in s.valid]
-            x, y = _med(delivered(r)[0] for r in v), _med(delivered(r)[1] for r in v)
+        left = sum(sw.skipped for sw in run.sweeps)
+        for sw in run.sweeps:
+            b, steps = sw.name, sw.steps
+            x, y = sw.delivered
             rate, more = outcome(steps)
             res.append(f"| {b} | {fmt_rate(x)} | {fmt_rate(y)} | {rate} | {more} |")
-            sh = shape_of(mine[0])
+            sh = sw.shape
             label = f"{b} {sh.w}/{sh.p}" + (f" (P{sh.wp}/P{sh.pp})" if (sh.wp, sh.pp) != (16, 16) else "")
             for s in steps:
                 if s.ok:

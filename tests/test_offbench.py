@@ -1589,6 +1589,15 @@ def _cap(build, readers, read, state="ok", cores=None, threads=79, rtt=0.05, w=8
             "rtt_ms": {"gen_replica": {"min_ms": rtt}}, "valid": state == "ok", "invalid": inv}
 
 
+def test_replcap_rtt_flag_uses_the_slowest_reader_host():
+    from offbench import replcap
+    rec = {"cell": {"conns": 100, "pipeline": 16}, "replica": {"read_kcmd_s": 10000.0},
+           "rtt_ms": {"gen_replica": {"min_ms": 0.05}}}
+    assert not replcap.rtt_flag([rec])          # 160 us per request against a 50 us round trip
+    rec["rtt_ms"]["gen_replica2"] = {"min_ms": 0.2}
+    assert replcap.rtt_flag([rec])
+
+
 def test_replcap_report_outcomes_and_flags():
     from offbench import replcap
     recs = []
@@ -1676,3 +1685,157 @@ def test_deploy_source_only_rsyncs_and_nothing_else():
     res = _deploy.sync_source(host, _deploy.SshConfig(key="id.pem", known_hosts="kh"), _OFFBENCH_ROOT, runner=run)
     assert res.ok and [c[0] for c in calls] == ["rsync"]
     assert calls[0][-1] == "ec2-user@10.0.0.2:~/offbench-src"
+
+
+_WLAT = {"p50_us": 103, "p90_us": 115, "p99_us": 143, "p999_us": 156, "p9999_us": 178, "max_us": 337}
+_PLAT = {"p50_us": 95, "p90_us": 105, "p99_us": 144, "p999_us": 155, "p9999_us": 182, "max_us": 378}
+
+
+def _view_run(tmp_path, builds=None):
+    """A 4-core pinned run of three builds with host details that must not reach the page, and its registry."""
+    import json
+    recs = []
+    for n, z in ((0, 0), (50, 5000), (100, 5800), (200, 6400)):
+        recs += [_cap("custom", n, z) for _ in range(3)]
+    recs += [_cap("stock", 0, 0) for _ in range(3)] + [_cap("stock", 50, 2260) for _ in range(3)]
+    recs += [_cap("stock", n, 2500, "behind") for n in (100, 200) for _ in range(3)]
+    recs += [_cap("rr", 50, 6450) for _ in range(3)] + [_cap("rr", 100, 6630) for _ in range(3)]
+    recs += [_cap("rr", 200, 6600, "behind")] + [_cap("rr", 200, 6500) for _ in range(2)]
+    recs += [_cap("rr", 400, 6560) for _ in range(3)]
+    commit = {"stock": "dcc66eff8b75", "rr": "902371a4457d", "custom": "5116158ffba1"}
+    for i, r in enumerate(recs):
+        name = r["bin"]["name"]
+        r["bin"] = {"name": name, "commit": commit[name],
+                    "replica_args": "--keyspace-shard-bits 10" if name == "custom" else ""}
+        r["hosts"] = {"primary": "metal-2", "replica": "metal-7", "gen": "metal-8", "rgen": "metal-4"}
+        r["replica"]["slave0"] = "ip=172.31.0.9,port=7400"
+        r["ts"] = f"2026-10-05T21:{22 + i // 10:02d}:00Z"
+        r["cell"]["pin"] = 1
+        r["rtt_ms"] = {"gen_replica": {"min_ms": 0.05, "median_ms": 0.11},
+                       "gen_replica2": {"min_ms": 0.06, "median_ms": 0.12}}
+        r["writer"] = {"latency": dict(_WLAT)}
+        r["preader"] = {"latency": dict(_PLAT)}
+    (tmp_path / "repl").mkdir()
+    (tmp_path / "repl" / "run.jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+    reg = {"ref": "stock", "cores": [2, 4],
+           "builds": builds if builds is not None else [
+               {"id": "stock", "label": "stock valkey", "commit": "dcc66eff8"},
+               {"id": "rr", "label": "replica reads", "commit": "902371a44"},
+               {"id": "custom", "label": "custom", "commit": "5116158ff", "replica_args": "--keyspace-shard-bits 10"},
+               {"id": "unused", "label": "in no run", "commit": "abcdef012"}],
+           "runs": [{"file": "repl/run.jsonl", "targets": [782.0, 988.0]}]}
+    return reg
+
+
+def test_replview_exports_judged_runs_without_host_details(tmp_path):
+    import json
+    from offbench import replview
+    d = replview.build(_view_run(tmp_path), tmp_path)
+    text = json.dumps(d, allow_nan=False)
+    assert "metal-" not in text and "172.31" not in text
+    assert d["cores"] == [2, 4] and d["ref"] == "stock"
+    assert [b["id"] for b in d["builds"]] == ["stock", "rr", "custom"]
+    (run,) = d["runs"]
+    assert run["cores"] == 4 and run["targets"]["x"] == 782.0 and run["first_ts"] == "2026-10-05T21:22:00Z"
+    assert run["pinned"] is True
+    assert run["rtt_ms"] == {"gen_replica": 0.11, "gen_replica2": 0.12}
+    sw = {s["build"]: s for s in run["sweeps"]}
+    base = sw["custom"]["steps"][0]
+    assert {k: base["writer_lat"][k] for k in _WLAT} == _WLAT and base["writer_lat"]["n"] == 3
+    assert base["primary_reader_lat"]["range"]["p9999_us"] == [182, 182] and "lat" not in base
+    assert sw["custom"]["steps"][1]["lat"]["p99_us"] == 500 and sw["custom"]["steps"][1]["lat"]["n"] == 3
+    assert sw["custom"]["capacity"] == {"read": 6400, "readers": 200, "at_least": True}
+    assert sw["custom"]["outcome"]["kind"] == "rising"
+    assert sw["stock"]["capacity"] == {"read": 2260, "readers": 50, "at_least": True}
+    assert (sw["stock"]["outcome"]["kind"], sw["stock"]["outcome"]["last"], sw["stock"]["outcome"]["first_behind"]) \
+        == ("falls-out", 50, 100)
+    assert [s["role"] for s in sw["stock"]["steps"]] == ["base", "curve", "behind", "behind"]
+    behind = sw["stock"]["steps"][2]
+    assert behind["behind"] == 3 and not {"x", "y", "read", "lat", "writer_lat", "primary_reader_lat"} & set(behind)
+    # one lagging rep at 200 caps rr at 100; the in-sync 400 above it is shown but not counted
+    assert sw["rr"]["capacity"] == {"read": 6630, "readers": 100, "at_least": False}
+    assert sw["rr"]["outcome"]["kind"] == "unstable"
+    assert [s["role"] for s in sw["rr"]["steps"]] == ["curve", "curve", "behind", "again"]
+    assert sw["rr"]["steps"][3]["read"] == 6560 and sw["rr"]["steps"][3]["lat"]["p99_us"] == 500
+    assert sw["rr"]["x"] == 800.0 and sw["rr"]["shape"] == {"w": 7, "wp": 16, "p": 9, "pp": 16}
+
+
+def test_replview_refuses_a_build_the_registry_does_not_name(tmp_path):
+    import pytest
+    from offbench import replview
+    reg = _view_run(tmp_path, builds=[{"id": "stock", "label": "stock", "commit": "dcc66eff8"},
+                                      {"id": "custom", "label": "custom", "commit": "5116158ff"}])
+    with pytest.raises(replview.ViewError, match=r"build rr \(902371a44\) matches 0"):
+        replview.build(reg, tmp_path)
+    reg["builds"].append({"id": "custom-plain", "label": "custom, no shard bits", "commit": "5116158ff", "replica_args": ""})
+    reg["builds"].append({"id": "rr", "label": "rr", "commit": "902371a44"})
+    assert [s["build"] for s in replview.build(reg, tmp_path)["runs"][0]["sweeps"]] == ["stock", "custom", "rr"]
+
+
+def test_replview_tells_one_commits_core_layouts_apart_by_share(tmp_path):
+    """The same binary run with main on an IO thread's core (share 1) and on its own (share 0) is two builds."""
+    import json
+    import pytest
+    from offbench import replview
+    reg = _view_run(tmp_path)
+    path = tmp_path / "repl" / "run.jsonl"
+    recs = [json.loads(line) for line in path.read_text().splitlines()]
+    own = []
+    for r in recs:
+        if r["bin"]["name"] == "custom":
+            r["bin"]["share"] = 1
+            own.append(json.loads(json.dumps(r)))
+            own[-1]["bin"].update(name="customown", share=0)
+    path.write_text("".join(json.dumps(r) + "\n" for r in recs + own))
+    shard = "--keyspace-shard-bits 10"
+    reg["builds"][2:3] = [
+        {"id": "custom", "label": "custom", "commit": "5116158ff", "replica_args": shard},
+        {"id": "customown", "label": "custom, own core", "commit": "5116158ff", "replica_args": shard}]
+    with pytest.raises(replview.ViewError, match=r"build custom(own)? \(5116158ff\) matches 2"):
+        replview.build(reg, tmp_path)
+    reg["builds"][2]["share"], reg["builds"][3]["share"] = 1, 0
+    d = replview.build(reg, tmp_path)
+    assert [s["build"] for s in d["runs"][0]["sweeps"]] == ["stock", "rr", "custom", "customown"]
+    assert [b["id"] for b in d["builds"]] == ["stock", "rr", "custom", "customown"]
+    assert "share" not in json.dumps(d["builds"])
+
+
+def test_replview_latency_is_aggregated_as_on_the_throughput_page():
+    """Percentiles are the median across reps, max is the max, range is each field's lowest and highest rep."""
+    from offbench import replview
+    recs = [{"writer": {"latency": dict(_WLAT, p99_us=p, max_us=m)}} for p, m in ((140, 300), (150, 900), (160, 400))]
+    lat = replview._lat(recs + [{"writer": None}, {}], "writer")
+    assert (lat["p99_us"], lat["max_us"], lat["p50_us"], lat["n"]) == (150, 900, 103, 3)
+    assert lat["range"]["p99_us"] == [140, 160] and lat["range"]["max_us"] == [300, 900]
+    assert replview._lat([{"writer": None}], "writer") is None
+
+
+def test_replview_marks_unpinned_runs_and_refuses_a_mixed_one(tmp_path):
+    import json
+    import pytest
+    from offbench import replview
+    reg = _view_run(tmp_path)
+    f = tmp_path / "repl" / "run.jsonl"
+    recs = [json.loads(line) for line in f.read_text().splitlines()]
+    recs[0]["cell"]["pin"] = 0
+    f.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    with pytest.raises(replview.ViewError, match="4-core run without calibration mixes pinned and unpinned"):
+        replview.build(reg, tmp_path)
+    for r in recs:
+        del r["cell"]["pin"]
+    f.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    assert replview.build(reg, tmp_path)["runs"][0]["pinned"] is False
+
+
+def test_cli_export_repl_writes_the_page_data(monkeypatch, tmp_path):
+    import json
+    from offbench import cli
+    monkeypatch.setattr(cli, "REPL_DASH", tmp_path / "replica")
+    reg = tmp_path / "view.json"
+    reg.write_text(json.dumps(_view_run(tmp_path)))
+    assert cli.main(["--root", str(tmp_path), "export-repl", "--registry", str(reg)]) == 0
+    assert json.loads((tmp_path / "replica" / "data" / "replica.json").read_text())["runs"][0]["cores"] == 4
+    bad = json.loads(reg.read_text())
+    bad["builds"] = bad["builds"][:1]
+    reg.write_text(json.dumps(bad))
+    assert cli.main(["--root", str(tmp_path), "export-repl", "--registry", str(reg)]) == 2
