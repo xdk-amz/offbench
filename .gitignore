@@ -5,3 +5,6 @@ data/
 dash/data/
 dash/replica/data/
 vendor/cachecannon/target/
+hosts.json
+known_hosts
+*.pem

@@ -1005,7 +1005,8 @@ def main(argv=None) -> int:
 
     x = sub.add_parser("push")
     x.add_argument("task_file")
-    x.add_argument("--host", default=os.environ.get("OFFBENCH_HOST", "ec2-user@192.0.2.10"))
+    x.add_argument("--host", default=os.environ.get("OFFBENCH_HOST"), required="OFFBENCH_HOST" not in os.environ,
+                   help="user@address to queue on (default $OFFBENCH_HOST)")
     x.add_argument("--key", default=os.environ.get("OFFBENCH_KEY", ""))
     x.add_argument("--known-hosts", default=os.environ.get("OFFBENCH_KNOWN_HOSTS", "/dev/null"))
     x.add_argument("--remote-root", default="~/offbench")
