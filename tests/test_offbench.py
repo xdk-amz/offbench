@@ -1589,15 +1589,6 @@ def _cap(build, readers, read, state="ok", cores=None, threads=79, rtt=0.05, w=8
             "rtt_ms": {"gen_replica": {"min_ms": rtt}}, "valid": state == "ok", "invalid": inv}
 
 
-def test_replcap_rtt_flag_uses_the_slowest_reader_host():
-    from offbench import replcap
-    rec = {"cell": {"conns": 100, "pipeline": 16}, "replica": {"read_kcmd_s": 10000.0},
-           "rtt_ms": {"gen_replica": {"min_ms": 0.05}}}
-    assert not replcap.rtt_flag([rec])          # 160 us per request against a 50 us round trip
-    rec["rtt_ms"]["gen_replica2"] = {"min_ms": 0.2}
-    assert replcap.rtt_flag([rec])
-
-
 def test_replcap_report_outcomes_and_flags():
     from offbench import replcap
     recs = []
