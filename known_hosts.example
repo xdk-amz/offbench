@@ -1,0 +1,15 @@
+# Host keys for the hosts in hosts.json, in OpenSSH known_hosts format: one
+# "<address> <key type> <base64 key>" line per key. offbench reads the file named by
+# OFFBENCH_KNOWN_HOSTS or --known-hosts.
+#
+# Collect a new host's keys once it is up, and check their fingerprints (ssh-keygen -lf known_hosts)
+# against the ones the instance prints to its console on first boot (aws ec2 get-console-output)
+# before trusting them:
+#
+#   ssh-keyscan -t ed25519,ecdsa 192.0.2.12 192.0.2.14 192.0.2.17 192.0.2.18 >> known_hosts
+#
+# A host without an Elastic IP gets a new public IP on every stop and start. Move its lines to the new
+# address only after ssh-keyscan there returns the key recorded for the old one.
+#
+# 192.0.2.12 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+# 192.0.2.12 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAA...

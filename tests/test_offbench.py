@@ -111,6 +111,12 @@ def test_host_registry_add_list_rm_roundtrip(tmp_path):
     assert reg.remove("metal-9") is False
 
 
+def test_hosts_example_is_a_registry_with_every_host_field():
+    path = Path(__file__).resolve().parents[1] / "hosts.example.json"
+    assert [h.name for h in hosts.load_registry(path).list()] == ["metal-2", "metal-4", "metal-7", "metal-8"]
+    assert all(set(e) == set(hosts.Host.__dataclass_fields__) for e in json.loads(path.read_text())["hosts"])
+
+
 def test_host_registry_get_and_resolve(tmp_path):
     reg = hosts.load_registry(tmp_path / "hosts.json")
     reg.add(hosts.Host(name="a", ssh="u@1"))

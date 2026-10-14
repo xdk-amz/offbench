@@ -1,0 +1,36 @@
+{
+  "hosts": [
+    {
+      "name": "metal-2",
+      "ssh": "ec2-user@192.0.2.12",
+      "instance_id": "i-1234567890abcdef0",
+      "az": "us-east-1b",
+      "remote_root": "~/offbench",
+      "tags": ["c8g"]
+    },
+    {
+      "name": "metal-4",
+      "ssh": "ec2-user@192.0.2.14",
+      "instance_id": "i-1234567890abcdef1",
+      "az": "us-east-1b",
+      "remote_root": "~/offbench",
+      "tags": ["c8g"]
+    },
+    {
+      "name": "metal-7",
+      "ssh": "ec2-user@192.0.2.17",
+      "instance_id": "i-1234567890abcdef2",
+      "az": "us-east-1b",
+      "remote_root": "~/offbench",
+      "tags": ["c8g"]
+    },
+    {
+      "name": "metal-8",
+      "ssh": "ec2-user@192.0.2.18",
+      "instance_id": "i-1234567890abcdef3",
+      "az": "us-east-1b",
+      "remote_root": "~/offbench",
+      "tags": ["c8g"]
+    }
+  ]
+}

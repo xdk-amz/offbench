@@ -23,13 +23,18 @@ offbench/
   offbench/merge.py      fold a per-host results.jsonl into the shared file, idempotent on record_id
   offbench/repl.py       primary/replica reps across hosts: orchestrator, host agent, validity
   offbench/replcap.py    replica read capacity: calibration search and the result table
+  offbench/replview.py   replica read capacity page data from the runs in repl_view.json
   offbench/cli.py        offbench queue|run|backfill|compare|export|publish|serve|hosts|push|sync|status|dispatch|deploy
-                         |repl-calibrate|repl-run|repl-capacity|repl-summary
+                         |repl-calibrate|repl-run|repl-capacity|repl-summary|export-repl
   offbench/__main__.py   package entrypoint (python3 -m offbench -> cli.main)
   __main__.py            project-root entrypoint (python3 -m offbench from the parent dir)
   vendor/cachecannon/    owned cachecannon source, pinned + auth baked in; built on the host
   dash/index.html        static dashboard (Chart.js from jsdelivr)
+  dash/replica/          replica read capacity page
   bins.json              rig directory name -> commit / branch / role
+  repl_view.json         builds and runs the replica read capacity page shows
+  hosts.example.json     host registry format, for a hosts.json when there is no shared registry
+  known_hosts.example    how to build the known-hosts file the ssh commands check
   data/                  default root: queue/ running/ done/ failed/ results.jsonl status.json hosts/
 ```
 
@@ -70,7 +75,16 @@ OFFBENCH_KEY=../rig/valkey-bench-09092304.pem OFFBENCH_KNOWN_HOSTS=../rig/known_
 
 Hosts come from the shared registry the hosts skill keeps (`~/.kiro/crew/hosts/registry.json`;
 `hosts.py add` registers one). `OFFBENCH_HOSTS_FILE` or `--hosts-file` points offbench at a local
-file instead, and then nothing is leased.
+file instead, as does a `hosts.json` beside this README when there is no shared registry, and then
+nothing is leased. `hosts.example.json` shows the format: each host needs a `name`, which `--hosts`
+and the `repl-*` role flags take, and an `ssh` target (`user@address`); `instance_id`, `az`,
+`remote_root` (default `~/offbench`) and `tags` are optional.
+
+ssh logs in with the private key named by `OFFBENCH_KEY` or `--key` and checks host keys against the
+file named by `OFFBENCH_KNOWN_HOSTS` or `--known-hosts`; `known_hosts.example` says how to build it.
+The `repl-*` commands need both and refuse a host whose key is not in the file. `deploy`, `dispatch`
+and `sync` check against the file when given one, and `push` does not check. `hosts.json`,
+`known_hosts` and `*.pem` are gitignored.
 
 The commands that use hosts lease them through `hosts.py claim`, and stop with exit 2 when another
 session holds one:

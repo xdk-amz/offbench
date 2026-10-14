@@ -34,7 +34,8 @@ procedure syncs the code; nothing here builds valkey or cachecannon.
 
 ## Procedure
 
-Run from the offbench checkout. Set the rig's ssh key and known-hosts file, the hosts and the builds:
+Run from the offbench checkout. Set the rig's ssh key and known-hosts file, the hosts and the builds. On
+another rig, the README's "Hosts and leases" section says what the host registry, key and known-hosts file need.
 
 ```
 export OFFBENCH_KEY=../rig/valkey-bench-09092304.pem OFFBENCH_KNOWN_HOSTS=../rig/known_hosts
