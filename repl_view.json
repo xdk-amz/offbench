@@ -8,14 +8,14 @@
      "note": "902371a44 + ACL integration, PR-readiness, drain and output-limit fixes"},
     {"id": "rr", "label": "offload-all + replica-reads", "commit": "902371a44",
      "branch": "main-thread-offload-replica-reads"},
-    {"id": "custom", "label": "staged loop + parallel apply + IO-thread parse", "commit": "5116158ff",
-     "branch": "replica-slot-apply", "replica_args": "--keyspace-shard-bits 10", "share": 1,
+    {"id": "staged", "label": "staged", "commit": "cbf29c2cf",
+     "branch": "main-thread-offload-staged-loop", "replica_args": "--keyspace-shard-bits 10", "share": 1,
      "note": "main shares a core with the first IO thread; replica keyspace-shard-bits 10"}
   ],
   "runs": [
-    {"file": "repl/pinned-c2-rerun.jsonl"},
-    {"file": "repl/pinned-c4.jsonl"},
-    {"file": "repl/pinned-c8-rerun.jsonl"},
-    {"file": "repl/pinned-c16-rerun.jsonl"}
+    {"file": "repl/pinned-c2-rerun.jsonl", "keep": ["stock", "rrd"], "add": [{"file": "repl/pinned-c2-staged.jsonl"}]},
+    {"file": "repl/pinned-c4.jsonl", "keep": ["stock", "rrd"], "add": [{"file": "repl/pinned-c4-staged.jsonl"}]},
+    {"file": "repl/pinned-c8-rerun.jsonl", "keep": ["stock", "rrd"], "add": [{"file": "repl/pinned-c8-staged.jsonl"}]},
+    {"file": "repl/pinned-c16-rerun.jsonl", "keep": ["stock", "rrd"], "add": [{"file": "repl/pinned-c16-staged.jsonl"}]}
   ]
 }
