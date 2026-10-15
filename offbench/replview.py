@@ -131,16 +131,52 @@ def _run(run: replcap.Run, builds: list) -> dict:
     }
 
 
+def _runs_of(entry: dict, root: Path, builds: list) -> list:
+    recs = repl.load(root / entry["file"], entry.get("run_id"))
+    if "keep" in entry:
+        recs = [r for r in recs if (r.get("bin") or {}).get("name") in entry["keep"]]
+    t = entry.get("targets")
+    return [_run(run, builds) for run in replcap.runs(recs, tuple(t) if t else None)]
+
+
+def _join(run: dict, add: dict, root: Path, builds: list) -> dict:
+    """run with the sweeps of one run measured separately at the same core count and targets. Each joined
+    sweep carries measured: its own dates, calibration and round trips."""
+    got = _runs_of(add, root, builds)
+    if len(got) != 1:
+        raise ViewError(f"{add['file']} holds {len(got)} runs, needs exactly 1 to join a run")
+    other = got[0]
+    a, b = run["targets"], other["targets"]
+    if other["cores"] != run["cores"]:
+        raise ViewError(f"{add['file']} ran at {other['cores']} cores, the run it joins at {run['cores']}")
+    if not (a and b and all(abs(b[k] / a[k] - 1) < 1e-6 for k in ("x", "y")) and a["tol"] == b["tol"]):
+        raise ViewError(f"{add['file']} targets {b} differ from the run it joins ({a})")
+    if other["pinned"] != run["pinned"]:
+        raise ViewError(f"{add['file']} pinned={other['pinned']}, the run it joins pinned={run['pinned']}")
+    have = {sw["build"] for sw in run["sweeps"]}
+    for sw in other["sweeps"]:
+        if sw["build"] in have:
+            raise ViewError(f"{add['file']}: {sw['build']} is already in the run it joins")
+        sw["measured"] = {k: other[k] for k in ("calibration", "first_ts", "last_ts", "rtt_ms")}
+    order = {b["id"]: i for i, b in enumerate(builds)}
+    run["sweeps"] = sorted(run["sweeps"] + other["sweeps"], key=lambda s: order[s["build"]])
+    return run
+
+
 def build(registry: dict, root: Path) -> dict:
     """The page's JSON for the runs the registry lists. A run entry: file (under root), optional run_id
-    to pick one run out of the file, and optional targets [X, Y] for records that carry none."""
+    to pick one run out of the file, optional targets [X, Y] for records that carry none, optional keep
+    (the build names to show from the file), and optional add: entries of the same form, each one run
+    measured separately at the same core count and targets, whose sweeps join this run."""
     builds = registry.get("builds") or []
     runs = []
     for entry in registry.get("runs") or []:
-        recs = repl.load(root / entry["file"], entry.get("run_id"))
-        t = entry.get("targets")
-        for run in replcap.runs(recs, tuple(t) if t else None):
-            runs.append(_run(run, builds))
+        found = _runs_of(entry, root, builds)
+        for add in entry.get("add") or []:
+            if len(found) != 1:
+                raise ViewError(f"{entry['file']} holds {len(found)} runs; add needs exactly 1")
+            found[0] = _join(found[0], add, root, builds)
+        runs += found
     used = {sw["build"] for r in runs for sw in r["sweeps"]}
     return {
         "metadata": {"generated": datetime.now(timezone.utc).isoformat(), "runs": len(runs),

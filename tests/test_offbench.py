@@ -1824,6 +1824,69 @@ def test_replview_marks_unpinned_runs_and_refuses_a_mixed_one(tmp_path):
     assert replview.build(reg, tmp_path)["runs"][0]["pinned"] is False
 
 
+def _staged_recs(io_threads=4, cal_ids=("cal-20261015T191706Z",)):
+    """A pinned run of one build measured on its own, with ping medians, for joining into _view_run's run."""
+    recs = []
+    for c, cal in enumerate(cal_ids):
+        for i, (n, z) in enumerate(((0, 0), (50, 5200), (100, 6100), (200, 6900))):
+            for _ in range(3):
+                r = _cap("staged", n, z)
+                r["bin"] = {"name": "staged", "commit": "cbf29c2cf0f5", "replica_args": "--keyspace-shard-bits 10"}
+                r["cell"].update(pin=1, io_threads=io_threads)
+                r["ts"] = f"2026-10-15T{19 + c}:{20 + i:02d}:00Z"
+                r["calibration"] = {"id": cal}
+                r["rtt_ms"] = {"gen_primary": {"min_ms": 0.08, "median_ms": 0.109},
+                               "gen_replica": {"min_ms": 0.05, "median_ms": 0.095}}
+                recs.append(r)
+    return recs
+
+
+def test_replview_joins_a_build_measured_separately_into_a_run(tmp_path):
+    """keep picks builds out of a run's file; add joins one run of another build measured at the same core
+    count and targets, and the joined sweep carries its own dates, calibration and round trips."""
+    import json
+    from offbench import replview
+    reg = _view_run(tmp_path)
+    (tmp_path / "repl" / "staged.jsonl").write_text("".join(json.dumps(r) + "\n" for r in _staged_recs()))
+    reg["builds"][2] = {"id": "staged", "label": "staged", "commit": "cbf29c2cf", "replica_args": "--keyspace-shard-bits 10"}
+    reg["runs"][0].update(keep=["stock", "rr"], add=[{"file": "repl/staged.jsonl", "targets": [782.0, 988.0]}])
+    d = replview.build(reg, tmp_path)
+    (run,) = d["runs"]
+    assert [s["build"] for s in run["sweeps"]] == ["stock", "rr", "staged"]
+    assert [b["id"] for b in d["builds"]] == ["stock", "rr", "staged"]
+    staged = run["sweeps"][2]
+    assert staged["measured"] == {"calibration": "cal-20261015T191706Z", "first_ts": "2026-10-15T19:20:00Z",
+                                  "last_ts": "2026-10-15T19:23:00Z",
+                                  "rtt_ms": {"gen_primary": 0.109, "gen_replica": 0.095}}
+    assert staged["capacity"]["read"] == 6900 and "measured" not in run["sweeps"][0]
+    # the run's own dates and pings come from the builds it kept
+    assert run["first_ts"] == "2026-10-05T21:23:00Z" and run["rtt_ms"] == {"gen_replica": 0.11, "gen_replica2": 0.12}
+    assert "custom" not in json.dumps(d)
+
+
+def test_replview_refuses_a_join_that_does_not_match_the_run(tmp_path):
+    import json
+    import pytest
+    from offbench import replview
+    reg = _view_run(tmp_path)
+    reg["builds"][2] = {"id": "staged", "label": "staged", "commit": "cbf29c2cf", "replica_args": "--keyspace-shard-bits 10"}
+    f = tmp_path / "repl" / "staged.jsonl"
+
+    def join(recs, **add):
+        f.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        reg["runs"][0].update(keep=["stock", "rr"], add=[{"file": "repl/staged.jsonl", "targets": [782.0, 988.0], **add}])
+        return replview.build(reg, tmp_path)
+    with pytest.raises(replview.ViewError, match="targets"):
+        join(_staged_recs(), targets=[790.0, 988.0])
+    with pytest.raises(replview.ViewError, match="ran at 2 cores, the run it joins at 4"):
+        join(_staged_recs(io_threads=2))
+    with pytest.raises(replview.ViewError, match="holds 2 runs"):
+        join(_staged_recs(cal_ids=("cal-a", "cal-b")))
+    with pytest.raises(replview.ViewError, match="stock is already in the run"):
+        join(_staged_recs(), file="repl/run.jsonl", keep=["stock"])
+    assert join(_staged_recs())["runs"][0]["sweeps"][2]["build"] == "staged"
+
+
 def test_cli_export_repl_writes_the_page_data(monkeypatch, tmp_path):
     import json
     from offbench import cli

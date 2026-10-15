@@ -222,15 +222,16 @@ function controls() {
 }
 
 function renderCapacity(run) {
-  const t = run.targets, ref = run.sweeps.find(sw => sw.build === D.ref);
+  const t = run.targets, ref = run.sweeps.find(sw => sw.build === D.ref), sep = run.sweeps.filter(sw => sw.measured);
   $('capTitle').textContent = `Replica read capacity · ${run.cores} cores per server`;
   $('capSub').innerHTML = (t ? `Every build's primary ran at the same <b>${fmtRate(t.x)} writes/s</b> (X) and <b>${fmtRate(t.y)} reads/s</b> (Y); a rep more than ${Math.round(t.tol * 100)}% off either is invalid. `
       : 'This run recorded no X and Y targets, so drift was not checked. ') +
-    `The capacity is the most replica reads/s over load steps where the replica kept up with every write in every rep, below the first step where it fell behind. ≥ marks a lower bound. Δ is against ${ref ? buildOf(ref.build).label : D.ref}.`;
+    `The capacity is the most replica reads/s over load steps where the replica kept up with every write in every rep, below the first step where it fell behind. ≥ marks a lower bound. Δ is against ${ref ? buildOf(ref.build).label : D.ref}.` +
+    (sep.length ? ` ${sep.map(sw => buildOf(sw.build).label).join(', ')} ${sep.length > 1 ? 'were' : 'was'} measured in a separate run at the same X and Y; Load steps gives when and its round trips.` : '');
   $('capTable').innerHTML = `<table><thead><tr><th>build</th><th>commit</th><th>writes/s (X)</th><th>primary reads/s (Y)</th><th>replica reads/s in sync</th><th>Δ</th><th class="text">when offered more reads</th></tr></thead><tbody>` +
     run.sweeps.map(sw => {
       const b = buildOf(sw.build), d = sw === ref ? null : capDelta(sw.capacity, ref && ref.capacity);
-      return `<tr><td><span class="sw" style="background:${color(sw.build)}"></span>${b.label}${b.note ? `<div class="mut" style="margin-left:15px;font-size:11px">${b.note}</div>` : ''}</td>
+      return `<tr><td><span class="sw" style="background:${color(sw.build)}"></span>${b.label}${b.note ? `<div class="mut" style="margin-left:15px;font-size:11px">${b.note}</div>` : ''}${sw.measured ? `<div class="mut" style="margin-left:15px;font-size:11px">measured separately, ${when(sw.measured)}</div>` : ''}</td>
         <td class="mut">${b.commit}</td><td>${fmtRate(sw.x)}</td><td>${fmtRate(sw.y)}</td>
         <td style="font-weight:650">${capText(sw.capacity)}</td>
         <td class="delta" style="background:${d ? deltaColor(d.d) : ''}" title="${d && d.tip ? d.tip : ''}">${d ? d.txt : '–'}</td>
@@ -303,12 +304,15 @@ function renderScaling() {
 }
 
 function renderSteps(run) {
-  const rtt = run.rtt_ms || {}, ms = v => v == null ? '–' : v.toFixed(3) + ' ms';
+  const ms = v => v == null ? '–' : v.toFixed(3) + ' ms';
+  const rtt = r => `Round trip (median ping): generator to primary ${ms(r.gen_primary)}, readers' generator to replica ${ms(r.gen_replica)}, primary to replica ${ms(r.primary_replica)}.`;
+  const sep = run.sweeps.filter(sw => sw.measured), own = run.sweeps.filter(sw => !sw.measured).map(sw => buildOf(sw.build).label);
   $('stepSub').innerHTML = `Medians over each step's valid reps; a step where the replica fell behind in any rep has no numbers. Connection counts are parameters: each build's writers and primary readers were calibrated to X and Y, and replica reader connections set the offered read load. RTT: the round trip is over half of each replica read's latency. GEN: the readers' generator ran out of cores. ` +
-    `<br>Run ${when(run)}${run.calibration ? `, calibration ${run.calibration}` : ''}. Round trip (median ping): generator to primary ${ms(rtt.gen_primary)}, readers' generator to replica ${ms(rtt.gen_replica)}, primary to replica ${ms(rtt.primary_replica)}.`;
+    `<br>${sep.length ? `${own.join(', ')}: run` : 'Run'} ${when(run)}${run.calibration ? `, calibration ${run.calibration}` : ''}. ${rtt(run.rtt_ms || {})}` +
+    sep.map(sw => `<br>${buildOf(sw.build).label}: measured separately ${when(sw.measured)}${sw.measured.calibration ? `, calibration ${sw.measured.calibration}` : ''}. ${rtt(sw.measured.rtt_ms || {})}`).join('');
   const shape = sw => { const s = sw.shape; return `${s.w}×P${s.wp} writers + ${s.p}×P${s.pp} primary readers`; };
   $('stepTable').innerHTML = `<table><thead><tr><th>replica reader conns</th><th>valid reps</th><th>writes/s</th><th>primary reads/s</th><th>replica reads/s</th><th>p50 <span class="u">µs</span></th><th>p99 <span class="u">µs</span></th><th>p99.9 <span class="u">µs</span></th><th>replica main · IO cores</th><th class="text">note</th></tr></thead><tbody>` +
-    run.sweeps.map(sw => `<tr class="grp"><td colspan="10"><span class="sw" style="background:${color(sw.build)}"></span>${buildOf(sw.build).label} <span class="mut">· ${shape(sw)}</span></td></tr>` +
+    run.sweeps.map(sw => `<tr class="grp"><td colspan="10"><span class="sw" style="background:${color(sw.build)}"></span>${buildOf(sw.build).label} <span class="mut">· ${shape(sw)}${sw.measured && sw.measured.first_ts ? ` · measured ${sw.measured.first_ts.slice(0, 10)}` : ''}</span></td></tr>` +
       sw.steps.map(s => {
         const pills = [];
         if (s.role === 'behind') pills.push(`<span class="pill behind">fell behind ${s.behind}/${s.n}</span>`);
