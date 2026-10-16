@@ -1115,7 +1115,7 @@ def cmd_runs(a: argparse.Namespace) -> int:
                 store, Path(a.records), label=a.label, calibration=Path(a.calibration) if a.calibration else None,
                 log_file=Path(a.log) if a.log else None, harness_commit=a.harness_commit,
                 harness_repo=Path(a.harness_repo) if a.harness_repo else None, evidence=a.evidence,
-                notes=a.note, tags=a.tag)
+                notes=a.note, tags=a.tag, scenario_version=a.scenario_version)
             print(f"imported {run.id}")
             for g in run.manifest.get("gaps") or []:
                 print(f"  gap: {g}")
@@ -1399,6 +1399,8 @@ def main(argv=None) -> int:
     ri.add_argument("--harness-repo", help="an offbench clone holding that commit (snapshot taken from it)")
     ri.add_argument("--evidence", help="where the harness commit comes from (a log line, a note)")
     ri.add_argument("--note", action="append", default=[]); ri.add_argument("--tag", action="append", default=[])
+    ri.add_argument("--scenario-version", type=int, default=None,
+                    help="the scenario method version the run used (see the scenario doc); unknown if omitted")
     ru.set_defaults(fn=cmd_runs)
 
     a = p.parse_args(argv)

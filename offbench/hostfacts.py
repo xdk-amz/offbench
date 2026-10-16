@@ -23,10 +23,11 @@ from typing import Optional
 
 from .packing import sha256_file
 
-# Packages the harness needs on a host, or whose version shapes a measurement (rpm -q).
-PACKAGES = ("system-release", "kernel", "glibc", "gcc", "make", "binutils", "git", "python3", "util-linux",
-            "procps-ng", "iputils", "ethtool", "chrony", "irqbalance", "tmux", "rsync", "tar", "gzip",
-            "openssl-libs", "systemd", "perf")
+# Packages the harness needs on a host, the rig's user-data installs, or whose version shapes a measurement.
+PACKAGES = ("system-release", "kernel", "glibc", "gcc", "gcc-c++", "make", "binutils", "git", "python3",
+            "openssl-devel", "jemalloc-devel", "tcl", "util-linux", "procps-ng", "iputils", "ethtool", "chrony",
+            "irqbalance", "numactl", "sysstat", "iperf3", "perf", "tmux", "rsync", "tar", "gzip", "openssl-libs",
+            "systemd")
 SYSCTLS = ("net.core.netdev_max_backlog", "net.core.somaxconn", "net.ipv4.tcp_max_syn_backlog",
            "net.core.rps_sock_flow_entries", "net.ipv4.ip_local_port_range", "net.core.rmem_max",
            "net.core.wmem_max", "net.ipv4.tcp_rmem", "net.ipv4.tcp_wmem", "net.ipv4.tcp_congestion_control",

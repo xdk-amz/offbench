@@ -16,6 +16,8 @@ ROLE_USE = {"primary": "primary server", "replica": "replica server",
 # What the harness needs on a host (the run's preflight checks some; the rest it calls).
 NEEDED = ("binutils", "ethtool", "gcc", "git", "make", "python3", "rsync", "tar", "gzip", "tmux", "iputils",
           "procps-ng", "util-linux", "chrony")
+# Packages every Amazon Linux host has as part of the OS: shown with their versions, never installed by hand.
+BASE = ("system-release", "kernel", "glibc", "systemd", "openssl-libs")
 # Flags whose values name files on the original machine, and what to use in a fresh checkout instead.
 PATH_FLAGS = ("--out", "--calibration", "--hosts-file", "--key", "--known-hosts", "--archive")
 
@@ -70,7 +72,8 @@ def _hosts(m: dict) -> list:
         i, o = f.get("instance") or {}, f.get("os") or {}
         rows.append([role, f"`{r.get('host')}`", _use(role), i.get("instance_type"), i.get("ami_id"),
                      o.get("release") or o.get("pretty"), f.get("kernel")])
-    L.append(f"Launch {len(roles)} hosts like the original ones, one per role:")
+    L.append(f"Launch {len(roles)} hosts like the original ones, one per role, with `scripts/host-userdata.sh` from the "
+             "harness (section 3) as user data:")
     L.append("")
     L += _table(["role", "original host", "used for", "instance type", "AMI", "OS release", "kernel"], rows)
     L.append("")
@@ -106,8 +109,8 @@ def _packages(m: dict) -> list:
     per = {role: (r.get("facts") or {}).get("packages") or {} for role, r in roles.items()}
     if not any(per.values()):
         return ["Package versions were not recorded. The harness needs: " + ", ".join(NEEDED) + "."]
-    have = sorted({p for pk in per.values() for p, v in pk.items() if v and p in NEEDED + ("perf",)})
-    L = ["On every host:", "", "    sudo dnf install -y " + " ".join(p for p in have if p != "perf"), "",
+    have = sorted({p for pk in per.values() for p, v in pk.items() if v and p not in BASE})
+    L = ["On every host (the user data does most of this):", "", "    sudo dnf install -y " + " ".join(have), "",
          "Versions the original hosts had (`rpm -q`); the AMI's release pins the repository, so the same AMI gives "
          "the same versions:", ""]
     rows = []
@@ -144,12 +147,15 @@ def _harness(m: dict, archive, run_dir: Path) -> list:
                  + (", with uncommitted changes" if h.get("dirty") else "")
                  + ", exactly as it ran: `HARNESS.json` in it lists every file's sha256. Run every command below "
                    "from that directory.")
-        if h.get("remote") and h.get("commit"):
+        if h.get("remote") and h.get("commit") and h.get("remote_branches_with_commit"):
             L += ["", f"The same with git: `git clone {h['remote']} offbench && git -C offbench checkout {h['commit']}`"
                   + (f", then `gzip -dc {_rel(archive, run_dir, h['diff_object'])} | git -C offbench apply` for the "
                      "uncommitted changes" if h.get("diff_object") else "")
                   + (". Untracked files it ran with: " + ", ".join(f"`{u}`" for u in h["untracked"]) + "."
                      if h.get("untracked") else ".")]
+        elif h.get("commit"):
+            L += ["", f"No branch of {h.get('remote') or 'its remote'} known here holds `{h['commit']}`, so the "
+                      "snapshot is the copy to use." + (f" Evidence for the commit: {h['evidence']}" if h.get("evidence") else "")]
     elif h.get("commit"):
         L.append(f"No snapshot of the harness was archived. It was offbench commit `{h['commit']}`"
                  + (f" (evidence: {h['evidence']})" if h.get("evidence") else "") + ".")
@@ -258,8 +264,17 @@ def _tuning(m: dict) -> list:
     sysctl = {role: (r.get("facts") or {}).get("sysctl") or {} for role, r in roles.items()}
     keys = sorted({k for s in sysctl.values() for k in s})
     if keys:
-        L += ["", "Kernel settings (AMI defaults unless pintune.sh sets them):", ""]
+        L += ["", "Kernel settings the original hosts had:", ""]
         L += _table(["sysctl"] + list(sysctl), [[k] + [sysctl[r].get(k) for r in sysctl] for k in keys])
+        first = next(s for s in sysctl.values() if s)
+        same = {k: v for k, v in first.items() if v is not None and all(s.get(k) == v for s in sysctl.values() if s)}
+        if same:
+            L += ["", "To set the ones they shared (pintune.sh sets netdev_max_backlog again):", "",
+                  "    sudo sysctl -w " + " ".join(shlex.quote(f"{k}={v}") for k, v in sorted(same.items()))]
+    nofile = {tuple((((r.get("facts") or {}).get("limits") or {}).get("nofile") or [])) for r in roles.values()} - {()}
+    if nofile:
+        L += ["", "Open-file limit of the login shell (soft, hard): " + "; ".join(f"{a} {b}" for a, b in sorted(nofile))
+              + ". The user data raises it in /etc/security/limits.conf; it applies from the next login."]
     return L
 
 

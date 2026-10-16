@@ -544,6 +544,10 @@ def test_import_records_archives_an_old_run_and_lists_what_it_lacks(tmp_path):
     run = archive.import_records(store, src, calibration=cal, harness_commit="732c61b", evidence="driver log line")
     m = store.manifest(run.dir)
     assert run.id == "20261006T231200Z-repl-run-pinned-c16-rerun-imported" and m["status"] == "imported"
+    assert m["ended"] == "2026-10-06T23:13:00Z" and m["seconds"] == 60 and m["scenario"]["version"] is None
+    assert any(g.startswith("scenario version not given") for g in m["gaps"])
+    assert m["config"]["loads"]["stock"] == {"writers": "20xP8", "primary_readers": "42xP1", "share": 0,
+                                             "replica_args": "", "primary_args": ""}
     assert m["builds"][0]["commit"] == "d" * 40 and not m["builds"][0]["binaries"]
     assert m["harness"] == {"name": "offbench", "commit": "732c61b", "evidence": "driver log line"}
     assert m["config"]["cores"] == [16] and m["config"]["calibration"] == "cal-20261006T231108Z"
@@ -563,6 +567,7 @@ def test_harness_from_commit_snapshots_a_clean_checkout(tmp_path):
     store = archive.Archive(tmp_path / "a").ensure()
     h = archive.harness_from_commit(root, commit[:7], store)
     assert h["commit"] == commit and h["dirty"] is False and h["code"]["offbench/x.py"] == _sha(b"X = 1\n")
+    assert h["remote_branches_with_commit"] == []                  # the test repo has no remote
     stamp = json.loads(tarfile.open(fileobj=io.BytesIO(store.read_bytes(h["snapshot"]["object"]))).extractfile("HARNESS.json").read())
     assert stamp["commit"] == commit
 

@@ -374,9 +374,11 @@ def harness_from_commit(repo: Path, commit: str, archive: Archive) -> dict:
         tmp = archive.tmp()
         r = packing.tar_gz(entries, tmp)
         archive.put_gz(tmp, r["sha256"], verify=False)
-        refs = _git(repo, "for-each-ref", "--contains", full, "--format=%(refname)") or ""
+        refs = (_git(repo, "for-each-ref", "--contains", full, "--format=%(refname)") or "").splitlines()
         return {"name": "offbench", "commit": full, "dirty": False, "listed_by": "git archive", "remote": stamp["remote"],
-                "refs_with_commit": refs.splitlines(),
+                "refs_with_commit": refs,
+                # From this clone's remote-tracking refs, which can be behind the remote.
+                "remote_branches_with_commit": [r[len("refs/remotes/"):] for r in refs if r.startswith("refs/remotes/")],
                 "snapshot": {"object": r["sha256"], "files": r["files"], "bytes": r["bytes"], "gz_bytes": r["gz_bytes"],
                              "left_out_secret_like": skipped},
                 "code": {n: h for n, h in hashes.items() if n.startswith("offbench/") and n.endswith(".py")},
@@ -668,7 +670,9 @@ class Run:
     # ---- the end ------------------------------------------------------------
     def seal(self, status: str, exit_code: Optional[int] = None, error: Optional[str] = None, *, ssh=None,
              roles: Optional[dict] = None, bins: Optional[list] = None, result: Optional[str] = None,
-             outputs: Optional[dict] = None, log: Callable[[str], None] = print) -> None:
+             outputs: Optional[dict] = None, log: Callable[[str], None] = print, ended: Optional[str] = None,
+             seconds: Optional[int] = None) -> None:
+        """ended/seconds: when the run itself ended and how long it took, for a run sealed later (an import)."""
         m = self.manifest
         if ssh is not None and roles and bins:
             self._recheck(ssh, roles, bins)
@@ -685,8 +689,8 @@ class Run:
         for tool in (m.get("tools") or {}).values():
             for g in tool.get("binaries") or []:
                 g["archived"] = self.archive.has(g["sha256"])
-        m.update(status=status, ended=iso(), exit_code=exit_code, error=error,
-                 seconds=round(time.time() - self._started))
+        m.update(status=status, ended=ended or iso(), exit_code=exit_code, error=error,
+                 seconds=seconds if seconds is not None else round(time.time() - self._started))
         log(f"archive: sealing {self.id} ({status})")
         detach = getattr(log, "detach", None)
         if detach:
@@ -828,7 +832,8 @@ def show(m: dict, notes: list = (), run_dir: Optional[Path] = None) -> str:
     cmd = m.get("command") or {}
     L = [f"run       {m['id']}  {m.get('status')}  {m.get('started')} .. {m.get('ended') or '(running)'}"
          + (f"  ({m['seconds'] // 60} min)" if m.get("seconds") else "")]
-    L.append(f"scenario  {sc.get('name')} v{sc.get('version')}, step {sc.get('step')}: {sc.get('question')}")
+    L.append(f"scenario  {sc.get('name')} " + (f"v{sc['version']}" if sc.get("version") is not None else "version unknown")
+             + f", step {sc.get('step')}: {sc.get('question')}")
     L.append(f"          defined in {sc.get('doc')} (sha256 {_short(sc.get('doc_sha256'))}) of the harness snapshot")
     if cmd.get("argv") is not None:
         L.append(f"command   python3 -m offbench {shlex.join(cmd['argv'])}")
@@ -836,8 +841,8 @@ def show(m: dict, notes: list = (), run_dir: Optional[Path] = None) -> str:
     if h:
         state = "dirty" if h.get("dirty") else "clean" if h.get("dirty") is False else "state unknown"
         snap = h.get("snapshot") or {}
-        L.append(f"harness   offbench {h.get('commit') or 'commit unknown'} ({h.get('branch') or '-'}, {state}) "
-                 f"{h.get('remote') or ''}")
+        L.append(f"harness   offbench {h.get('commit') or 'commit unknown'} ("
+                 + (f"branch {h['branch']}, " if h.get("branch") else "") + f"{state}) {h.get('remote') or ''}")
         L.append(f"          snapshot {_short(snap.get('object'), 16)} ({snap.get('files')} files)"
                  + (f"; evidence: {h['evidence']}" if h.get("evidence") else ""))
     else:
@@ -916,9 +921,11 @@ def _ts_id(ts: str) -> str:
 def import_records(archive: Archive, records: Path, *, label: Optional[str] = None,
                    calibration: Optional[Path] = None, log_file: Optional[Path] = None,
                    harness_commit: Optional[str] = None, harness_repo: Optional[Path] = None,
-                   evidence: Optional[str] = None, notes: list = (), tags=()) -> Run:
+                   evidence: Optional[str] = None, notes: list = (), tags=(),
+                   scenario_version: Optional[int] = None) -> Run:
     """Archive a run recorded before the archive existed, from its records file (and calibration and log). What
-    the records do not say (binaries, host facts, tool versions) is listed under gaps, not guessed."""
+    the records do not say (binaries, host facts, tool versions) is listed under gaps, not guessed; so is the
+    scenario version, unless the importer gives it."""
     from . import repl, replcap
     archive.ensure()
     records = Path(records)
@@ -952,6 +959,9 @@ def import_records(archive: Archive, records: Path, *, label: Optional[str] = No
     run._started = time.time()
     run.gap("recorded before the archive: the command line, host facts, binary hashes and tool versions were not "
             "captured at the time")
+    m["scenario"]["version"] = scenario_version
+    if scenario_version is None:
+        run.gap("scenario version not given at import: which method ran is in the harness commit and the notes")
     h = None
     if harness_commit and harness_repo:
         try:
@@ -992,9 +1002,14 @@ def import_records(archive: Archive, records: Path, *, label: Optional[str] = No
         m["config"].update(replica_reader_conns=sorted({c["conns"] for c in cells}),
                            replica_reader_pipelines=sorted({c["pipeline"] for c in cells}),
                            targets=first_rec.get("targets"), calibration=(first_rec.get("calibration") or {}).get("id"))
-        m["config"]["loads"] = {r["bin"]["name"]: {k: r["cell"].get(k) for k in ("write_conns", "write_pipeline",
-                                                                                 "p_conns", "p_pipeline")}
-                                for r in recs if r.get("cell")}
+        m["config"]["loads"] = {}
+        for r in recs:
+            c, b = r.get("cell") or {}, r.get("bin") or {}
+            m["config"]["loads"][b.get("name")] = {
+                "writers": f"{c.get('write_conns') or c.get('conns')}xP{c.get('write_pipeline') or c.get('pipeline')}",
+                "primary_readers": f"{c.get('p_conns') or 0}xP{c.get('p_pipeline') or c.get('pipeline')}",
+                "share": b.get("share", 0), "replica_args": b.get("replica_args", ""),
+                "primary_args": b.get("primary_args", "")}
     result = None
     try:
         loaded = [repl.revalidate(dict(r)) for r in recs]
@@ -1004,7 +1019,12 @@ def import_records(archive: Archive, records: Path, *, label: Optional[str] = No
             result = calibration_result(cal)
     except Exception as e:
         run.gap(f"no result table: the records did not load with this harness ({type(e).__name__}: {e})")
-    run.seal("imported", result=result, log=lambda s: None)
+
+    def epoch(ts: str) -> float:
+        import calendar
+        return calendar.timegm(time.strptime(ts.split(".")[0].rstrip("Z"), "%Y-%m-%dT%H:%M:%S"))
+    run.seal("imported", result=result, log=lambda s: None, ended=times[-1],
+             seconds=round(epoch(times[-1]) - epoch(times[0])))
     return run
 
 

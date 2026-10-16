@@ -115,9 +115,15 @@ python3 ~/.kiro/crew/skills/hosts/hosts.py release metal-2,metal-7,metal-8,metal
    ```
 
 Steps 2 and 3 are each archived as a run ([run archive](run-archive.md)); `python3 -m offbench runs list` shows
-them, and each run's `REPRODUCE.md` repeats it on new hosts. The archive calls this procedure version 1: one
-pipeline depth per role for every build, the 7% drift rule, and replica readers on one or more hosts. A change to
-the method gets a new version, noted here.
+them, and each run's `REPRODUCE.md` repeats it on new hosts. The archive records which version of this
+procedure a run followed:
+
+- 1: every build's writers and primary readers run at one pipeline depth per role, in the reference and every
+  probe; reps whose primary drifts more than 7% off X or Y are invalid; replica readers on one or more hosts.
+- 0: calibrated runs before that, where each build's calibration chose its own depths and the reference ran at
+  P16.
+
+A change to the method gets the next version, noted here.
 
 ## Validity
 
