@@ -331,6 +331,7 @@ def pin_server_threads(sp: int, io_threads: int, srv_pat: str, share_main: bool 
     want = {str(sp): str(PIN_MAIN_CPU)}
     names = {str(sp): "main"}
     epoll_tids = []
+    sender_tids = []
     for line in _run(["ps", "-L", "-o", "tid,comm", "-p", str(sp)]).stdout.splitlines():
         m = re.match(r"\s*(\d+)\s+io_thd_(\d+)", line)
         if m:
@@ -341,6 +342,9 @@ def pin_server_threads(sp: int, io_threads: int, srv_pat: str, share_main: bool 
         e = re.match(r"\s*(\d+)\s+io_epoll\b", line)
         if e:
             epoll_tids.append(e.group(1))
+        s = re.match(r"\s*(\d+)\s+repl_sender\b", line)
+        if s:
+            sender_tids.append(s.group(1))
     if len(want) != io_threads:
         kill_matching(srv_pat)
         raise CellError(f"pin: expected {io_threads - 1} io threads, found {len(want) - 1}")
@@ -352,6 +356,12 @@ def pin_server_threads(sp: int, io_threads: int, srv_pat: str, share_main: bool 
         _run(["taskset", "-pc", io_cpus, tid])
         want[tid] = io_cpus
         names[tid] = "io_epoll" if len(epoll_tids) == 1 else f"io_epoll_{i + 1}"
+    # The replica stream sender shares the IO-thread cores like io_epoll, never main's
+    # core or the housekeeping core. Absent (sender off / no thread) is fine.
+    for tid in sender_tids:
+        _run(["taskset", "-pc", io_cpus, tid])
+        want[tid] = io_cpus
+        names[tid] = "repl_sender"
     for tid, cpu in want.items():
         got = _run(["taskset", "-pc", tid]).stdout.strip().rsplit(" ", 1)[-1]
         if _cpuset(got) != _cpuset(cpu):

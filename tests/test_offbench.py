@@ -1997,3 +1997,105 @@ def test_thread_cpu_names_threads_and_drops_idle_ones(monkeypatch):
                    "jemalloc_bg_thd:15": 1.0}
     mine = cellmod.thread_ticks(os.getpid())
     assert mine[os.getpid()][0] == "main"
+# ---- primary-side bin configs and sender pinning (parallel-replies S3) -----
+
+def _expand(spec):
+    """Expand a taskset spec like '2-4' to a comma list '2,3,4' so a fake taskset
+    readback matches cell._cpuset of the requested range."""
+    out = []
+    for part in spec.split(","):
+        lo, _, hi = part.partition("-")
+        out += [str(x) for x in range(int(lo), int(hi or lo) + 1)]
+    return ",".join(out)
+
+
+def test_pin_server_threads_puts_repl_sender_on_the_io_cores(monkeypatch):
+    from offbench import cell as C
+    placed = {}
+    ps = ("  TID COMMAND\n  100 valkey-server\n  101 io_thd_1\n  102 io_thd_2\n  103 io_thd_3\n"
+          "  104 io_epoll\n  105 repl_sender\n")
+
+    def fake_run(argv, *a, **k):
+        class R:
+            stdout = ""
+        if argv[:2] == ["ps", "-L"]:
+            R.stdout = ps
+        elif argv[:2] == ["taskset", "-pc"] and len(argv) == 4:
+            placed[argv[3]] = argv[2]
+        elif argv[:2] == ["taskset", "-pc"]:
+            R.stdout = f"pid {argv[2]}'s current affinity list: {_expand(placed[argv[2]])}"
+        return R
+    monkeypatch.setattr(C, "_run", fake_run)
+    C.pin_server_threads(100, 4, "^x")
+    # main 1, io_thd_i 1+i, io_epoll and repl_sender both on the io core set 2-4
+    assert placed["100"] == "1"
+    assert placed["101"] == "2" and placed["102"] == "3" and placed["103"] == "4"
+    assert placed["104"] == "2-4"      # io_epoll on the io cores
+    assert placed["105"] == "2-4"      # repl_sender on the io cores, never main's or housekeeping
+
+
+def test_pin_server_threads_repl_sender_absent_is_fine(monkeypatch):
+    from offbench import cell as C
+    placed = {}
+    ps = "  TID COMMAND\n  100 valkey-server\n  101 io_thd_1\n  102 io_thd_2\n  103 io_epoll\n"
+
+    def fake_run(argv, *a, **k):
+        class R:
+            stdout = ""
+        if argv[:2] == ["ps", "-L"]:
+            R.stdout = ps
+        elif argv[:2] == ["taskset", "-pc"] and len(argv) == 4:
+            placed[argv[3]] = argv[2]
+        elif argv[:2] == ["taskset", "-pc"]:
+            R.stdout = f"pid {argv[2]}'s current affinity list: {_expand(placed[argv[2]])}"
+        return R
+    monkeypatch.setattr(C, "_run", fake_run)
+    C.pin_server_threads(100, 3, "^x")   # no repl_sender thread: must not raise
+    assert "105" not in placed and placed["103"] == "2-3"
+
+
+def test_server_snapshot_keeps_staged_and_repl_sender_fields(monkeypatch):
+    """The agent's INFO snapshot keeps staged_* and repl_sender* fields so the record carries them."""
+    from offbench import repl
+    info_text = (
+        "# Replication\nrole:master\nmaster_repl_offset:1000\nconnected_slaves:1\n"
+        "repl_sender_enabled:1\nrepl_sender_bytes:5000\nrepl_sender_writes:40\nrepl_sender_wakeups:12\n"
+        "# Fastpath\nstaged_iterations:900\nstaged_stream_phases:300\nstaged_main_streamwait_us:1234\n"
+        "staged_main_reply_us:50\ncmdstat_get:calls=10\nunrelated_field:99\n")
+    monkeypatch.setattr(repl, "_cli", lambda *a, **k: info_text)
+    monkeypatch.setattr(repl, "thread_ticks", lambda pid: {"main": 0.0, "io": 0.0})
+    monkeypatch.setattr(repl, "ena_counters", lambda: {k: 0 for k in repl.ALLOWANCE_FIELDS})
+    snap = repl._snapshot({"server": True, "pid": 1})
+    info = snap["info"]
+    assert info["staged_stream_phases"] == "300" and info["staged_main_streamwait_us"] == "1234"
+    assert info["repl_sender_enabled"] == "1" and info["repl_sender_bytes"] == "5000"
+    assert "unrelated_field" not in info      # the filter kept only known + staged_/repl_sender/cmdstat
+
+
+def test_staged_and_repl_sender_fields_land_in_server_metrics():
+    from offbench import repl
+    a = {"t": 0.0, "ut": 0.0, "info": {
+        "total_commands_processed": "0", "master_repl_offset": "0", "connected_clients": "1",
+        "staged_stream_phases": "0", "staged_main_streamwait_us": "0",
+        "repl_sender_bytes": "0", "repl_sender_enabled": "1"},
+        "ticks": {"main": 0.0, "io": 0.0}, "ena": {k: 0 for k in repl.ALLOWANCE_FIELDS}}
+    b = {"t": 6.0, "ut": 6.0, "info": dict(a["info"],
+        total_commands_processed="6000000", staged_stream_phases="300",
+        staged_main_streamwait_us="1234", repl_sender_bytes="5000"),
+        "ticks": {"main": 0.0, "io": 0.0}, "ena": {k: 0 for k in repl.ALLOWANCE_FIELDS}}
+    m = repl.server_metrics({"a": a, "b": b})
+    assert m["staged"]["staged_stream_phases"] == {"a": 0, "b": 300, "delta": 300}
+    assert m["staged"]["staged_main_streamwait_us"]["delta"] == 1234
+    assert m["repl_sender"]["repl_sender_bytes"] == {"a": "0", "b": "5000", "delta": 5000}
+    assert m["repl_sender"]["repl_sender_enabled"]["delta"] == 0
+
+
+def test_staged_and_repl_sender_fields_none_when_absent():
+    from offbench import repl
+    a = {"t": 0.0, "ut": 0.0, "info": {"total_commands_processed": "0", "master_repl_offset": "0",
+                                       "connected_clients": "1"},
+         "ticks": {"main": 0.0, "io": 0.0}, "ena": {k: 0 for k in repl.ALLOWANCE_FIELDS}}
+    b = {"t": 6.0, "ut": 6.0, "info": dict(a["info"], total_commands_processed="6000000"),
+         "ticks": {"main": 0.0, "io": 0.0}, "ena": {k: 0 for k in repl.ALLOWANCE_FIELDS}}
+    m = repl.server_metrics({"a": a, "b": b})
+    assert m["staged"] is None and m["repl_sender"] is None

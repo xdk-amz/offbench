@@ -186,7 +186,8 @@ def _snapshot(a: dict) -> dict:
         text = _cli("info", "all", acl=a.get("acl", False))
         snap["t"] = time.time()
         snap["info"] = {k: v for k, v in parse_info(text).items()
-                        if k in INFO_KEEP or k.startswith(("cmdstat_get", "cmdstat_set", "slave0"))}
+                        if k in INFO_KEEP or k.startswith(("cmdstat_get", "cmdstat_set", "slave0",
+                                                           "staged_", "repl_sender"))}
         snap["ticks"] = thread_ticks(a["pid"])
         snap["ut"] = time.time()
     if a.get("gens"):
@@ -662,7 +663,51 @@ def server_metrics(m: dict) -> dict:
         "primary_drain_bytes_delta": (_delta(a, b, "io_threaded_primary_drain_bytes")
                                       if b["info"].get("io_threaded_primary_drain_bytes") else None),
         "ena": {k: b["ena"][k] - a["ena"][k] for k in ALLOWANCE_FIELDS},
+        # Staged INFO fastpath fields (staged_stream_phases, staged_main_*_us) at both
+        # ends of the window: the analysis proves which path sent the stream.
+        "staged": staged_fields(a, b),
+        # Every INFO replication field starting repl_sender, at both ends.
+        "repl_sender": repl_sender_fields(a, b),
     }
+
+
+def staged_fields(a: dict, b: dict) -> Optional[dict]:
+    """The staged_* INFO fastpath fields at the window's start and end, plus the
+    delta for each. None when the server reports no staged_* fields (not a staged
+    build). staged_stream_phases and the staged_main_*_us timers are what the
+    analysis reads to tell a sender-sent stream from a main-sent one."""
+    keys = sorted(k for k in b["info"] if k.startswith("staged_"))
+    if not keys:
+        return None
+    def iv(info, k):
+        try:
+            return int(info.get(k) or 0)
+        except (TypeError, ValueError):
+            return None
+    out = {}
+    for k in keys:
+        va, vb = iv(a["info"], k), iv(b["info"], k)
+        out[k] = {"a": va, "b": vb, "delta": (vb - va) if (va is not None and vb is not None) else None}
+    return out
+
+
+def repl_sender_fields(a: dict, b: dict) -> Optional[dict]:
+    """Every INFO replication field whose name starts with repl_sender, at both
+    ends of the window with a numeric delta where both ends parse as integers.
+    None when the server reports none (sender off or a build without the sender)."""
+    keys = sorted(k for k in b["info"] if k.startswith("repl_sender"))
+    if not keys:
+        return None
+    out = {}
+    for k in keys:
+        va, vb = a["info"].get(k), b["info"].get(k)
+        delta = None
+        try:
+            delta = int(vb) - int(va)
+        except (TypeError, ValueError):
+            delta = None
+        out[k] = {"a": va, "b": vb, "delta": delta}
+    return out
 
 
 def build_record(cell: ReplCell, b: ReplBin, rep: int, roles: dict, pm: dict, rm: dict, gm: dict,
