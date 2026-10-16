@@ -49,13 +49,19 @@ def cpu_count(cpus: str) -> int:
     return n
 
 
+def all_cpus() -> str:
+    """Every online CPU. An unpinned cell runs on all of them, not on the affinity the worker inherited
+    (pintune.sh moves every process, sshd included, onto the housekeeping and IRQ CPUs)."""
+    return f"0-{(os.cpu_count() or 1) - 1}"
+
+
 def server_launch_argv(server_cmd_list: list[str], cell: Cell) -> list[str]:
-    pfx = ["taskset", "-c", PIN_HK_CPUS] if cell.pin else []
+    pfx = ["taskset", "-c", PIN_HK_CPUS if cell.pin else all_cpus()]
     return [*pfx, "setsid", "-f", *server_cmd_list]
 
 
 def generator_launch_argv(cachecannon: Path, toml: Path, cell: Cell) -> list[str]:
-    pfx = ["taskset", "-c", PIN_GEN_CPUS] if cell.pin else []
+    pfx = ["taskset", "-c", PIN_GEN_CPUS if cell.pin else all_cpus()]
     return [*pfx, "setsid", "-f", str(cachecannon), str(toml)]
 
 

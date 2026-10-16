@@ -801,10 +801,11 @@ def test_pinned_launch_layout_matches_script():
     assert "threads = 63" in toml and 'cpu_list = "33-95"' in toml
 
 
-def test_unpinned_launch_is_unchanged():
+def test_unpinned_launch_runs_on_every_cpu(monkeypatch):
     c = _Cell("get", 16, 7000, 8)
-    assert _cell.server_launch_argv(["/b/s"], c) == ["setsid", "-f", "/b/s"]
-    assert _cell.generator_launch_argv(_Path("/cc"), _Path("/t"), c) == ["setsid", "-f", "/cc", "/t"]
+    monkeypatch.setattr(_cell.os, "cpu_count", lambda: 96)
+    assert _cell.server_launch_argv(["/b/s"], c) == ["taskset", "-c", "0-95", "setsid", "-f", "/b/s"]
+    assert _cell.generator_launch_argv(_Path("/cc"), _Path("/t"), c) == ["taskset", "-c", "0-95", "setsid", "-f", "/cc", "/t"]
     assert "cpu_list" not in _cell.cachecannon_toml(c)
 
 
