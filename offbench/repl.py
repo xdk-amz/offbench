@@ -227,6 +227,36 @@ def agent(a: dict) -> dict:
                 out["pintune"] = str(e)
         return out
 
+    if act == "facts":
+        from . import hostfacts
+        out = hostfacts.collect(servers=a["servers"], cachecannon=str(CACHECANNON) if a.get("gen") else None,
+                                cli=str(CLI) if a.get("cli") else None)
+        out["code"] = code_hashes()
+        return out
+
+    if act == "hash":
+        from . import hostfacts
+        return {"binaries": [hostfacts.binary(p, quick=True) for p in a["paths"]]}
+
+    if act == "pack":
+        # Each item becomes one gzip file under WORK for the orchestrator to fetch (and delete): a file as it is,
+        # a tree as a deterministic tar. Named by the sha256 of the uncompressed bytes.
+        from . import packing
+        items = []
+        tag = os.urandom(4).hex()
+        for i, it in enumerate(a["items"]):
+            dest = WORK / f"pack-{tag}-{i}.gz"
+            src = Path(os.path.expanduser(it["path"]))
+            if it["kind"] == "file":
+                r = packing.gzip_file(src, dest, level=it.get("level", 1))
+            else:
+                exclude = packing.VALKEY_TREE_EXCLUDE if it.get("exclude") == "valkey-build" else ()
+                entries, skipped = packing.walk(src, exclude, max_bytes=it.get("max_bytes"))
+                r = packing.tar_gz([(n, p, None) for n, p in entries], dest, level=it.get("level", 6))
+                r["skipped"] = skipped
+            items.append(dict(r, gz=str(dest)))
+        return {"items": items}
+
     if act == "rtt":
         procs = {ip: subprocess.Popen(["ping", "-n", "-c", str(a.get("count", 25)), "-i", "0.2", ip],
                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -256,33 +286,40 @@ def agent(a: dict) -> dict:
         argv = server_cmd(Path(a["server"]), cell, log, extra, bind=f"127.0.0.1 {a['bind_ip']}")
         pat = _srv_pat(a["server"])
         assert_none(pat, "valkey-server")
-        subprocess.Popen(server_launch_argv(argv, cell), stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        launch = server_launch_argv(argv, cell)
+        subprocess.Popen(launch, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(0.7)
         sp = pids_matching(pat)
         if len(sp) != 1:
             raise CellError(f"expected one server pid, got {sp}")
         sp = sp[0]
+        post = []     # what the control connection ran after start, as valkey-cli arguments
+
+        def cli_post(*args: str, acl: bool) -> str:
+            post.append(list(args))
+            return _cli(*args, acl=acl)
         if cell.acl:
             for cmd in acl_setuser_cmds(str(CLI), PORT):
+                post.append(cmd[5:])
                 _run(cmd)
+        pins = None
         if cell.pin:
-            pin_server_threads(sp, cell.io_threads, pat, share_main=bool(a.get("pin_share")))
+            pins = pin_server_threads(sp, cell.io_threads, pat, share_main=bool(a.get("pin_share")))
         # Closed-loop writes outrun any replica, so the default replica output
         # buffer limit turns every rep into a disconnect/full-resync loop. Lift it
         # and report the lag instead.
-        r = _cli("config", "set", "client-output-buffer-limit", "replica 0 0 0", acl=cell.acl)
+        r = cli_post("config", "set", "client-output-buffer-limit", "replica 0 0 0", acl=cell.acl)
         if "OK" not in r:
             raise CellError(f"config set client-output-buffer-limit failed: {r.strip()}")
         if a["role"] == "replica":
             if cell.acl:
                 # the replica authenticates to the primary as the bench user
-                _cli("config", "set", "masteruser", "bench", acl=True)
-                _cli("config", "set", "masterauth", "benchpw", acl=True)
-            r = _cli("replicaof", a["primary_ip"], str(PORT), acl=cell.acl)
+                cli_post("config", "set", "masteruser", "bench", acl=True)
+                cli_post("config", "set", "masterauth", "benchpw", acl=True)
+            r = cli_post("replicaof", a["primary_ip"], str(PORT), acl=cell.acl)
             if "OK" not in r:
                 raise CellError(f"replicaof failed: {r.strip()}")
-        return {"pid": sp}
+        return {"pid": sp, "argv": launch, "post": post, "pins": pins}
 
     if act == "status":
         info = parse_info(_cli("info", "all", acl=a.get("acl", False)))
@@ -293,15 +330,15 @@ def agent(a: dict) -> dict:
         cell = Cell(workload=a["workload"], pipeline=a["pipeline"], conns=a["conns"],
                     keys=a["keys"], value_size=a["value_size"], acl=a.get("acl", 0), pin=1)
         toml = WORK / f"{a['name']}.toml"
-        toml.write_text(cachecannon_toml(cell, window_s=a["window_s"], threads=a["threads"],
-                                         cpu_list=a["cpus"], endpoint=f"{a['target_ip']}:{PORT}",
-                                         prefill=a["prefill"], duration_s=a["duration_s"]))
+        text = cachecannon_toml(cell, window_s=a["window_s"], threads=a["threads"], cpu_list=a["cpus"],
+                                endpoint=f"{a['target_ip']}:{PORT}", prefill=a["prefill"], duration_s=a["duration_s"])
+        toml.write_text(text)
         out, err = WORK / f"{a['name']}.json", WORK / f"{a['name']}.err"
+        launch = ["taskset", "-c", a["cpus"], "setsid", "-f", str(CACHECANNON), str(toml)]
         with out.open("w") as o, err.open("w") as e:
-            subprocess.Popen(["taskset", "-c", a["cpus"], "setsid", "-f", str(CACHECANNON), str(toml)],
-                             stdin=subprocess.DEVNULL, stdout=o, stderr=e)
+            subprocess.Popen(launch, stdin=subprocess.DEVNULL, stdout=o, stderr=e)
         time.sleep(0.5)
-        return {"alive": bool(pids_matching(_gen_pat(a["name"])))}
+        return {"alive": bool(pids_matching(_gen_pat(a["name"]))), "argv": launch, "toml": text}
 
     if act == "gen_alive":
         return {g: bool(pids_matching(_gen_pat(g))) for g in a["gens"]}
@@ -493,12 +530,24 @@ class Ssh:
     def __init__(self, key: str, known_hosts: str, src: str = "~/offbench-src"):
         self.key, self.known_hosts, self.src = key, known_hosts, src
 
-    def argv(self, role: Role, payload: dict) -> list[str]:
-        remote = f"cd {self.src} && python3 -m offbench repl-agent {shlex.quote(json.dumps(payload))}"
+    def _ssh(self, role: Role, remote: str) -> list[str]:
         return ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
                 "-o", f"UserKnownHostsFile={self.known_hosts}", "-i", self.key,
                 "-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/obr-%C", "-o", "ControlPersist=120",
                 role.ssh, "bash -lc " + shlex.quote(remote)]
+
+    def argv(self, role: Role, payload: dict) -> list[str]:
+        return self._ssh(role, f"cd {self.src} && python3 -m offbench repl-agent {shlex.quote(json.dumps(payload))}")
+
+    def fetch(self, role: Role, remote_path: str, dest: Path, timeout: float = 900) -> None:
+        """Copy an absolute remote path to dest over the same connection, then delete the remote copy."""
+        q = shlex.quote(remote_path)
+        with Path(dest).open("wb") as f:
+            r = subprocess.run(self._ssh(role, f"cat {q} && rm -f {q}"), stdout=f, stderr=subprocess.PIPE,
+                               timeout=timeout)
+        if r.returncode:
+            raise CellError(f"{role.name}: fetch {remote_path} failed rc={r.returncode} "
+                            f"{r.stderr.decode(errors='replace').strip()[-300:]}")
 
     def _parse(self, role: Role, payload: dict, r: subprocess.CompletedProcess) -> dict:
         lines = [l for l in r.stdout.splitlines() if l.startswith("{")]
@@ -731,6 +780,21 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
 
     wait_for("replica link", lambda: ssh.call(R, {"action": "status", "acl": acl}).get("master_link_status") == "up", 30)
     gen = {"keys": cell.keys, "value_size": cell.value_size, "acl": cell.acl, "window_s": window_s}
+    # What this rep started where: each server's argv, post-start commands and thread pinning, and each
+    # generator's argv and config (by sha256; run_matrix writes the texts to its launch_dir).
+    role_of = {v.name: k for k, v in roles.items()}
+    launch = {side: {k: got.get(k) for k in ("argv", "post", "pins")} for side, got in (("primary", pp), ("replica", rp))}
+    launch["gens"] = []
+    tomls: dict = {}
+
+    def started(h: Role, name: str, conns: int, got: dict) -> bool:
+        text = got.get("toml")
+        sha = hashlib.sha256(text.encode()).hexdigest() if text else None
+        if text:
+            tomls[sha] = text
+        launch["gens"].append({"name": name, "role": role_of.get(h.name), "conns": conns, "toml_sha256": sha,
+                               "argv": got.get("argv")})
+        return bool(got.get("alive"))
     # Replica readers run on their own host or hosts when given (--reader-gen), with the connections split
     # evenly; the rest on the generator host.
     RGs = [roles[k] for k in reader_keys(roles)]
@@ -739,24 +803,28 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
     readers = [(h, n) for h, n in zip(RGs, split_conns(cell.conns, len(RGs))) if n] if own else []
     reader_cap = cell.cpus("reader", own)[1]
     # cachecannon needs at least one connection per thread
-    if not ssh.call(G, {"action": "gen_start", "name": "writer", "workload": "set", "target_ip": P.ip,
-                        "pipeline": cell.w_pipeline, "conns": cell.w_conns, "prefill": True,
-                        "cpus": cell.cpus("writer", own)[0],
-                        "threads": cell.threads("writer", own), "duration_s": 240, **gen})["alive"]:
+    if not started(G, "writer", cell.w_conns,
+                   ssh.call(G, {"action": "gen_start", "name": "writer", "workload": "set", "target_ip": P.ip,
+                                "pipeline": cell.w_pipeline, "conns": cell.w_conns, "prefill": True,
+                                "cpus": cell.cpus("writer", own)[0],
+                                "threads": cell.threads("writer", own), "duration_s": 240, **gen})):
         raise CellError("writer did not start")
     wait_for("replica prefill", lambda: ssh.call(R, {"action": "status", "acl": acl})["dbsize"] >= cell.keys, 60)
     rt = P if cell.read_target == "primary" else R
     for h, n in readers or ([(G, cell.conns)] if cell.conns else []):
-        if not ssh.call(h, {"action": "gen_start", "name": "reader", "workload": "get", "target_ip": rt.ip,
-                            "pipeline": cell.pipeline, "conns": n, "prefill": False,
-                            "cpus": cell.cpus("reader", own)[0], "threads": min(reader_cap, n),
-                            "duration_s": 200, **gen})["alive"]:
+        if not started(h, "reader", n,
+                       ssh.call(h, {"action": "gen_start", "name": "reader", "workload": "get", "target_ip": rt.ip,
+                                    "pipeline": cell.pipeline, "conns": n, "prefill": False,
+                                    "cpus": cell.cpus("reader", own)[0], "threads": min(reader_cap, n),
+                                    "duration_s": 200, **gen})):
             raise CellError(f"reader did not start on {h.name}")
-    if cell.p_conns and not ssh.call(G, {"action": "gen_start", "name": "preader", "workload": "get", "target_ip": P.ip,
-                                         "pipeline": cell.pp_pipeline, "conns": cell.p_conns, "prefill": False,
-                                         "cpus": cell.cpus("preader", own)[0],
-                                         "threads": cell.threads("preader", own),
-                                         "duration_s": 200, **gen})["alive"]:
+    if cell.p_conns and not started(G, "preader", cell.p_conns,
+                                    ssh.call(G, {"action": "gen_start", "name": "preader", "workload": "get",
+                                                 "target_ip": P.ip, "pipeline": cell.pp_pipeline,
+                                                 "conns": cell.p_conns, "prefill": False,
+                                                 "cpus": cell.cpus("preader", own)[0],
+                                                 "threads": cell.threads("preader", own),
+                                                 "duration_s": 200, **gen})):
         raise CellError("primary reader did not start")
 
     def ready() -> bool:
@@ -812,7 +880,10 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
         g.pop("samples", None)
     stops = {"primary": ssh.call(P, {"action": "server_stop", "role": "primary", "server": b.server}),
              "replica": ssh.call(R, {"action": "server_stop", "role": "replica", "server": b.server})}
-    return build_record(cell, b, rep, roles, pm, rm, gm, gens, stops, window_s, run_id, rgms=rgms)
+    rec = build_record(cell, b, rep, roles, pm, rm, gm, gens, stops, window_s, run_id, rgms=rgms)
+    rec["launch"] = launch
+    rec["_tomls"] = tomls     # run_matrix keeps these out of the record
+    return rec
 
 
 def merge_readers(parts: list[dict]) -> dict:
@@ -842,7 +913,10 @@ def cleanup(ssh: Ssh, roles: dict, all_servers: list[str]) -> None:
 
 def run_matrix(ssh: Ssh, roles: dict, cells: list[ReplCell], bins: list[ReplBin], reps: int, out: Path,
                window_s: int = 6, log: Callable[[str], None] = print, meta: Optional[dict] = None,
-               run_id: Optional[str] = None, collect: Optional[list] = None) -> int:
+               run_id: Optional[str] = None, collect: Optional[list] = None, tee: Optional[Path] = None,
+               launch_dir: Optional[Path] = None) -> int:
+    """tee: a second file every record is appended to (the archive's records.jsonl); launch_dir: where each
+    distinct generator config is written once, as <sha256>.toml."""
     run_id = run_id or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     items = plan(cells, bins, reps)
     all_servers = [b.server for b in bins]
@@ -863,8 +937,15 @@ def run_matrix(ssh: Ssh, roles: dict, cells: list[ReplCell], bins: list[ReplBin]
             errors_in_row += 1
         rec.update(meta or {})
         revalidate(rec)   # meta can carry targets the rep is judged against
-        with out.open("a") as f:
-            f.write(json.dumps(rec) + "\n")
+        tomls = rec.pop("_tomls", None) or {}
+        if launch_dir is not None:
+            for sha, text in tomls.items():
+                if not (launch_dir / f"{sha}.toml").exists():
+                    (launch_dir / f"{sha}.toml").write_text(text)
+        line = json.dumps(rec) + "\n"
+        for path in [out] + ([tee] if tee is not None else []):
+            with path.open("a") as f:
+                f.write(line)
         if collect is not None:
             collect.append(rec)
         if "error" in rec:

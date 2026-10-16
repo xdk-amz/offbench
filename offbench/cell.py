@@ -284,13 +284,14 @@ def _cpuset(spec: str) -> set[int]:
     return out
 
 
-def pin_server_threads(sp: int, io_threads: int, srv_pat: str, share_main: bool = False) -> None:
-    """Move main to PIN_MAIN_CPU and io_thd_i to cpu i+PIN_MAIN_CPU, then verify each.
+def pin_server_threads(sp: int, io_threads: int, srv_pat: str, share_main: bool = False) -> dict:
+    """Move main to PIN_MAIN_CPU and io_thd_i to cpu i+PIN_MAIN_CPU, then verify each. Returns thread name -> cpus.
 
     share_main puts io_thd_1 on main's core and io_thd_i on cpu i-1+PIN_MAIN_CPU, so io-threads N
     uses N-1 cores; the epoll thread shares those cores."""
     _run(["taskset", "-pc", str(PIN_MAIN_CPU), str(sp)])
     want = {str(sp): str(PIN_MAIN_CPU)}
+    names = {str(sp): "main"}
     epoll_tids = []
     for line in _run(["ps", "-L", "-o", "tid,comm", "-p", str(sp)]).stdout.splitlines():
         m = re.match(r"\s*(\d+)\s+io_thd_(\d+)", line)
@@ -298,6 +299,7 @@ def pin_server_threads(sp: int, io_threads: int, srv_pat: str, share_main: bool 
             cpu = str(int(m.group(2)) + PIN_MAIN_CPU - (1 if share_main else 0))
             _run(["taskset", "-pc", cpu, m.group(1)])
             want[m.group(1)] = cpu
+            names[m.group(1)] = f"io_thd_{m.group(2)}"
         e = re.match(r"\s*(\d+)\s+io_epoll\b", line)
         if e:
             epoll_tids.append(e.group(1))
@@ -308,14 +310,16 @@ def pin_server_threads(sp: int, io_threads: int, srv_pat: str, share_main: bool 
     io_cpus = f"{PIN_MAIN_CPU + 1}-{PIN_MAIN_CPU + io_threads - 1}" if io_threads > 2 else str(PIN_MAIN_CPU + 1)
     if share_main:
         io_cpus = f"{PIN_MAIN_CPU}-{PIN_MAIN_CPU + io_threads - 2}" if io_threads > 2 else str(PIN_MAIN_CPU)
-    for tid in epoll_tids:
+    for i, tid in enumerate(epoll_tids):
         _run(["taskset", "-pc", io_cpus, tid])
         want[tid] = io_cpus
+        names[tid] = "io_epoll" if len(epoll_tids) == 1 else f"io_epoll_{i + 1}"
     for tid, cpu in want.items():
         got = _run(["taskset", "-pc", tid]).stdout.strip().rsplit(" ", 1)[-1]
         if _cpuset(got) != _cpuset(cpu):
             kill_matching(srv_pat)
             raise CellError(f"pin: thread {tid} on cpu {got!r}, expected {cpu}")
+    return {names[tid]: cpu for tid, cpu in want.items()}
 
 
 def run_rep(paths: Paths, cell: Cell, *, window_s: int = 6, perf: bool = False, extra_server_args: str = "",

@@ -114,6 +114,11 @@ python3 ~/.kiro/crew/skills/hosts/hosts.py release metal-2,metal-7,metal-8,metal
    python3 -m offbench repl-capacity data/repl/<name>.jsonl
    ```
 
+Steps 2 and 3 are each archived as a run ([run archive](run-archive.md)); `python3 -m offbench runs list` shows
+them, and each run's `REPRODUCE.md` repeats it on new hosts. The archive calls this procedure version 1: one
+pipeline depth per role for every build, the 7% drift rule, and replica readers on one or more hosts. A change to
+the method gets a new version, noted here.
+
 ## Validity
 
 `repl-run` judges every rep, and the rules are applied again whenever records are loaded. The replica is in

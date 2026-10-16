@@ -24,8 +24,12 @@ offbench/
   offbench/repl.py       primary/replica reps across hosts: orchestrator, host agent, validity
   offbench/replcap.py    replica read capacity: calibration search and the result table
   offbench/replview.py   replica read capacity page data from the runs in repl_view.json
+  offbench/archive.py    run archive: one sealed directory per repl run (manifest, records, log, objects)
+  offbench/hostfacts.py  what a host is and runs (instance, OS, packages, tools, tuning, binaries), for the archive
+  offbench/packing.py    deterministic tar/gzip named by sha256, on the orchestrator and the hosts
+  offbench/reproduce.py  a run's REPRODUCE.md, from its manifest
   offbench/cli.py        offbench queue|run|backfill|compare|export|publish|serve|hosts|push|sync|status|dispatch|deploy
-                         |repl-calibrate|repl-run|repl-capacity|repl-summary|export-repl
+                         |repl-calibrate|repl-run|repl-capacity|repl-summary|export-repl|runs
   offbench/__main__.py   package entrypoint (python3 -m offbench -> cli.main)
   __main__.py            project-root entrypoint (python3 -m offbench from the parent dir)
   vendor/cachecannon/    owned cachecannon source, pinned + auth baked in; built on the host
@@ -143,3 +147,10 @@ remember it. Primary/replica runs (`repl-*`) have their own rules, in the scenar
 
 - [Replica read capacity](docs/replica-read-capacity.md): at X writes/s and Y reads/s on the primary, how
   many reads/s the replica serves before it falls out of sync (`repl-calibrate`, `repl-run`, `repl-capacity`).
+
+## Run archive
+
+Every `repl-calibrate` and `repl-run` is archived under `~/offbench-runs` (or `OFFBENCH_ARCHIVE`) as a sealed run:
+scenario, exact command and config, harness snapshot, every binary by sha256 with its build settings and source,
+tool versions, host facts, records, log, result and a `REPRODUCE.md`. `python3 -m offbench runs list` and
+`runs show <run>` answer what ran; [docs/run-archive.md](docs/run-archive.md) has the rest.

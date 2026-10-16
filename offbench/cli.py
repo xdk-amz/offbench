@@ -12,6 +12,8 @@
   offbench push <task.json> / sync    move tasks to and results from the rig over ssh
   offbench repl-calibrate / repl-run / repl-capacity / repl-summary
                                       primary/replica runs across hosts (docs/replica-read-capacity.md)
+  offbench runs list | show | verify | reproduce | bundle | note | import
+                                      the run archive every repl-calibrate and repl-run writes (docs/run-archive.md)
   offbench deploy --source-only       rsync this checkout to hosts for repl-run, no worker
 """
 
@@ -674,7 +676,11 @@ def _repl_hosts(a: argparse.Namespace, cal: Optional[dict] = None):
 
 
 def _repl_log(out: Path):
+    """A log that prints and appends to <out>.log; log.attach(path) copies everything so far to path and then
+    writes there too (the archive run's run.log)."""
     log_path = out.with_suffix(".log")
+    lines: list = []
+    tees: list = []
 
     def log(msg: str) -> None:
         line = time.strftime("%Y-%m-%dT%H:%M:%SZ ", time.gmtime()) + msg
@@ -682,6 +688,25 @@ def _repl_log(out: Path):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a") as f:
             f.write(line + "\n")
+        if tees:
+            for t in list(tees):
+                try:
+                    with t.open("a") as f:
+                        f.write(line + "\n")
+                except OSError:
+                    tees.remove(t)
+        else:
+            lines.append(line)
+
+    def attach(path: Path) -> None:
+        path.write_text("".join(l + "\n" for l in lines))
+        lines.clear()
+        tees.append(path)
+
+    def detach(path: Path) -> None:
+        if path in tees:
+            tees.remove(path)
+    log.attach, log.detach = attach, detach
     return log
 
 
@@ -713,6 +738,82 @@ def _kv(spec: Optional[str]) -> dict:
     return dict(kv.split("=", 1) for kv in (spec or "").split(",") if kv)
 
 
+# ---------------------------------------------------------------- archive ----
+
+def _archive(a: argparse.Namespace):
+    """The run archive this command writes to, or None when --archive/OFFBENCH_ARCHIVE say off."""
+    from . import archive as archive_mod
+    root = archive_mod.resolve_root(getattr(a, "archive", None))
+    return archive_mod.Archive(root) if root else None
+
+
+def _archive_args(a: argparse.Namespace) -> dict:
+    """The parsed arguments as JSON, key and known-hosts files by name only."""
+    out = {}
+    for k, v in sorted(vars(a).items()):
+        if k == "fn" or k.startswith("_"):
+            continue
+        if k in ("key", "known_hosts") and v:
+            v = {"file": Path(v).name}
+        out[k] = str(v) if isinstance(v, Path) else v
+    return out
+
+
+def _archive_begin(a: argparse.Namespace, command: str, calibrated: bool, config: dict, log):
+    """Open the archive run for this invocation; None when the archive is off or cannot be opened (logged: a run
+    is never stopped by its archive)."""
+    from . import archive as archive_mod
+    store = _archive(a)
+    if store is None:
+        log("archive: off")
+        return None
+    tags = list(getattr(a, "tag", None) or []) + [t for t in os.environ.get("OFFBENCH_ARCHIVE_TAGS", "").split(",") if t]
+    try:
+        run = archive_mod.Run.begin(store, command=command, label=Path(a.out).stem,
+                                    argv=getattr(a, "_argv", None) or sys.argv[1:], args=_archive_args(a),
+                                    scenario=archive_mod.scenario_for(command, calibrated), config=config,
+                                    tags=tags, log=log)
+    except Exception as e:
+        log(f"archive: could not open a run in {store.root}: {type(e).__name__}: {e}; continuing without it")
+        return None
+    run.manifest["outputs"] = {"legacy_out": str(Path(a.out).resolve())}
+    log.attach(run.log_path)
+    return run
+
+
+def _archive_capture(run, ssh, roles: dict, bins: list, rtt: dict, a: argparse.Namespace, log) -> None:
+    """Host facts, binaries and sources into the archive run. A failure here is recorded and the run goes on."""
+    if run is None:
+        return
+    try:
+        run.capture(ssh, roles, bins, rtt, log=log, fetch=not a.no_archive_binaries)
+    except Exception as e:
+        run.gap(f"host facts and binaries not captured: {type(e).__name__}: {e}")
+        log(f"archive: capture failed ({type(e).__name__}: {e}); the run goes on without it")
+
+
+def _archive_seal(run, status: str, rc, err, log, **kw) -> None:
+    if run is None:
+        return
+    try:
+        run.seal(status, rc, err, log=log, **kw)
+    except Exception as e:
+        log(f"archive: sealing {run.id} failed: {type(e).__name__}: {e}")
+
+
+def _sigterm_raises() -> None:
+    """SIGTERM (a lease running out, tmux kill) unwinds like ^C, so the run is sealed as aborted and the hosts
+    cleaned."""
+    import signal
+
+    def handler(signum, frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+    try:
+        signal.signal(signal.SIGTERM, handler)
+    except ValueError:      # not the main thread (tests)
+        pass
+
+
 def cmd_repl_run(a: argparse.Namespace) -> int:
     from . import lease as lease_mod
     from . import repl
@@ -737,6 +838,7 @@ def cmd_repl_run(a: argparse.Namespace) -> int:
         print(got, file=sys.stderr)
         return 2
     names, registry = got
+    _sigterm_raises()
     try:
         with lease_mod.held(list(names.values()), f"offbench repl-run {Path(a.out).stem}", registry=registry.path):
             return _repl_run(a, repl, registry.hosts, names, cal)
@@ -796,7 +898,41 @@ def _repl_run(a: argparse.Namespace, repl, reg: dict, names: dict, cal: Optional
         log(f"calibration {cal['id']}: targets {cal['targets']['write_kcmd_s']:.0f}k writes/s, "
             f"{cal['targets']['read_kcmd_s']:.0f}k reads/s; " + ", ".join(
                 f"{b.name} {b.write_conns}xP{b.write_pipeline}/{b.p_conns}xP{b.p_pipeline}" for b in bins))
-    return repl.run_matrix(ssh, roles, cells, bins, a.reps, Path(a.out), window_s=a.window, log=log, meta=meta)
+    config = {"cores": sorted({c.cores for c in cells}), "acl": ints(a.acl),
+              "replica_reader_conns": ints(a.conns), "replica_reader_pipelines": ints(a.pipelines),
+              "reps": a.reps, "window_s": a.window, "max_rtt_ms": a.max_rtt_ms, "read_target": a.read_target,
+              "reps_planned": len(repl.plan(cells, bins, a.reps)), "limit": a.limit,
+              "calibration": cal["id"] if cal else None, "targets": meta.get("targets"),
+              "loads": {b.name: {"writers": f"{b.write_conns or 'cell'}xP{b.write_pipeline or a.write_pipeline or 'cell'}",
+                                 "primary_readers": f"{b.p_conns or a.p_conns}xP{b.p_pipeline or a.p_pipeline or 'cell'}",
+                                 "share": b.share, "replica_args": b.replica_args, "primary_args": b.primary_args}
+                        for b in bins}}
+    run = _archive_begin(a, "repl-run", bool(cal), config, log)
+    if run is not None:
+        meta["archive_run"] = run.id
+        if cal:
+            run.put_input_calibration(Path(a.calibration), cal)
+    status, rc, err = "aborted", None, None
+    try:
+        _archive_capture(run, ssh, roles, bins, rtt, a, log)
+        rc = repl.run_matrix(ssh, roles, cells, bins, a.reps, Path(a.out), window_s=a.window, log=log, meta=meta,
+                             tee=run.records if run else None, launch_dir=run.launch_dir if run else None)
+        status = "complete" if rc == 0 else "failed"
+        return rc
+    except BaseException as e:
+        err = f"{type(e).__name__}: {e}"
+        repl.cleanup(ssh, roles, [b.server for b in bins])
+        raise
+    finally:
+        if run is not None:
+            result = None
+            try:
+                from . import replcap
+                recs = repl.load(run.records) if run.records.exists() else []
+                result = (replcap.report(recs, None) if cal else repl.sweep_summary(recs)) if recs else None
+            except Exception as e:
+                log(f"archive: no result table: {type(e).__name__}: {e}")
+            _archive_seal(run, status, rc, err, log, ssh=ssh, roles=roles, bins=bins, result=result)
 
 
 def cmd_repl_calibrate(a: argparse.Namespace) -> int:
@@ -810,6 +946,7 @@ def cmd_repl_calibrate(a: argparse.Namespace) -> int:
         print(got, file=sys.stderr)
         return 2
     names, registry = got
+    _sigterm_raises()
     try:
         with lease_mod.held(list(names.values()), f"offbench repl-calibrate {Path(a.out).stem}",
                             registry=registry.path):
@@ -820,9 +957,6 @@ def cmd_repl_calibrate(a: argparse.Namespace) -> int:
 
 
 def _repl_calibrate(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
-    from dataclasses import replace as _replace
-
-    from . import replcap
     bins, err = _repl_bins(argparse.Namespace(bins=a.bins, share_bins=a.share_bins, pin_share=False,
                                               bin_write_conns=None, bin_p_conns=None), repl, None)
     if err:
@@ -837,10 +971,45 @@ def _repl_calibrate(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
     if isinstance(opened, int):
         return opened
     ssh, roles, rtt = opened
+    config = {"cores": [int(a.iot)], "write_pipeline": a.write_pipeline, "p_pipeline": a.p_pipeline,
+              "targets": a.targets or "lowest builds' rates at the reference load", "ref_writers": a.ref_writers,
+              "ref_p_conns": a.ref_p_conns, "ref_reps": a.ref_reps, "tol": a.tol, "max_probes": a.max_probes,
+              "confirm_reps": a.confirm_reps, "window_s": a.window, "max_rtt_ms": a.max_rtt_ms,
+              "loads": {b.name: {"share": b.share, "replica_args": b.replica_args, "primary_args": b.primary_args}
+                        for b in bins}}
+    run = _archive_begin(a, "repl-calibrate", True, config, log)
+    status, rc, err, doc = "aborted", None, None, None
+    try:
+        _archive_capture(run, ssh, roles, bins, rtt, a, log)
+        rc, doc = _calibrate(a, repl, names, bins, out, ssh, roles, rtt, log, run)
+        status = "complete" if rc == 0 else "failed"
+        return rc
+    except BaseException as e:
+        err = f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        if run is not None:
+            from . import archive as archive_mod
+            outputs, result = {}, None
+            if doc:
+                run.put_calibration(doc)
+                outputs = {"calibration_id": doc["id"], "converged": doc.get("converged"), "targets": doc.get("targets"),
+                           "calibration": str(out.with_suffix(".json").resolve())}
+                result = archive_mod.calibration_result(doc)
+            _archive_seal(run, status, rc, err, log, ssh=ssh, roles=roles, bins=bins, result=result, outputs=outputs)
+
+
+def _calibrate(a: argparse.Namespace, repl, names: dict, bins: list, out: Path, ssh, roles: dict, rtt: dict, log,
+               arun) -> tuple:
+    """The calibration itself: (exit code, calibration document or None)."""
+    from dataclasses import replace as _replace
+
+    from . import replcap
     cal_id = "cal-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     cores = int(a.iot)
     base = repl.ReplCell(pipeline=a.p_pipeline, conns=0, io_threads=cores, write_pipeline=a.write_pipeline, p_conns=1)
     runs = []
+    extra = {"archive_run": arun.id} if arun is not None else {}
 
     def measure(shapes: dict, reps: int, phase: str) -> dict:
         run = [_replace(b, write_conns=shapes[b.name].w, write_pipeline=shapes[b.name].wp,
@@ -848,8 +1017,10 @@ def _repl_calibrate(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
         runs.append(phase)
         got: list = []
         repl.run_matrix(ssh, roles, [base], run, reps, out, window_s=a.window, log=log,
-                        meta={"rtt_ms": rtt, "phase": phase, "calib_id": cal_id},
-                        run_id=f"{cal_id}-{len(runs):02d}-{phase}", collect=got)
+                        meta={"rtt_ms": rtt, "phase": phase, "calib_id": cal_id, **extra},
+                        run_id=f"{cal_id}-{len(runs):02d}-{phase}", collect=got,
+                        tee=arun.records if arun is not None else None,
+                        launch_dir=arun.launch_dir if arun is not None else None)
         res: dict = {}
         for r in got:
             res.setdefault(r["bin"]["name"], []).append(r)
@@ -873,13 +1044,13 @@ def _repl_calibrate(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
                                 max_probes=a.max_probes, confirm_reps=a.confirm_reps, log=log, seed=seed)
     except repl.CellError as e:
         log(f"calibration failed: {e}")
-        return 1
+        return 1, None
     finally:
         repl.cleanup(ssh, roles, [b.server for b in bins])
     doc = {"kind": "repl-calibration", "schema": 1, "id": cal_id,
            "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "records": str(out),
            "hosts": names, "bins": {kv.split("=", 1)[0]: kv.split("=", 1)[1] for kv in a.bins.split(",")},
-           "share_bins": sorted(b.name for b in bins if b.share), "iot": cores, "reference": ref, **res}
+           "share_bins": sorted(b.name for b in bins if b.share), "iot": cores, "reference": ref, **res, **extra}
     path = out.with_suffix(".json")
     path.write_text(json.dumps(doc, indent=1) + "\n")
     for b, v in res["builds"].items():
@@ -894,7 +1065,7 @@ def _repl_calibrate(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
     if res["converged"]:
         log(f"next: python3 -m offbench repl-run --calibration {path} --conns 0,50,100,200,400,800 --pipelines 16 "
             f"--reps 3 --out <sweep>.jsonl")
-    return 0 if res["converged"] else 1
+    return (0 if res["converged"] else 1), doc
 
 
 def cmd_repl_capacity(a: argparse.Namespace) -> int:
@@ -910,6 +1081,70 @@ def cmd_repl_summary(a: argparse.Namespace) -> int:
     recs = repl.load(Path(a.path), a.run_id)
     print(repl.sweep_summary(recs) if a.sweep else repl.summary(recs))
     return 0
+
+
+def cmd_runs(a: argparse.Namespace) -> int:
+    from . import archive as archive_mod
+    root = archive_mod.resolve_root(a.archive)
+    if root is None:
+        print("runs: the archive is off (--archive / OFFBENCH_ARCHIVE)", file=sys.stderr)
+        return 2
+    store = archive_mod.Archive(root)
+    try:
+        if a.rcmd == "list":
+            filt = {k: getattr(a, k) for k in ("scenario", "step", "commit", "binary", "cores", "tag", "status",
+                                               "label", "since")}
+            ms = [m for m in store.manifests() if archive_mod.matches(m, **filt)]
+            if a.json:
+                print(json.dumps(ms, indent=1))
+            elif ms:
+                print("\n".join(archive_mod.list_line(m) for m in ms))
+            else:
+                print(f"no runs in {store.runs_dir}" + (" match" if any(v is not None for v in filt.values()) else ""))
+            return 0
+        if a.rcmd == "verify":
+            dirs = [store.resolve(r) for r in a.refs] if a.refs else store.run_dirs()
+            bad = 0
+            for d in dirs:
+                problems = archive_mod.verify(store, d, objects=not a.quick)
+                print(f"{d.name}: " + ("ok" if not problems else "; ".join(problems)))
+                bad += bool(problems)
+            return 1 if bad else 0
+        if a.rcmd == "import":
+            run = archive_mod.import_records(
+                store, Path(a.records), label=a.label, calibration=Path(a.calibration) if a.calibration else None,
+                log_file=Path(a.log) if a.log else None, harness_commit=a.harness_commit,
+                harness_repo=Path(a.harness_repo) if a.harness_repo else None, evidence=a.evidence,
+                notes=a.note, tags=a.tag)
+            print(f"imported {run.id}")
+            for g in run.manifest.get("gaps") or []:
+                print(f"  gap: {g}")
+            return 0
+        d = store.resolve(a.ref)
+        m = store.manifest(d)
+        if a.rcmd == "show":
+            print(json.dumps(m, indent=1) if a.json else archive_mod.show(m, store.notes(m["id"]), d))
+        elif a.rcmd == "reproduce":
+            print((d / "REPRODUCE.md").read_text() if (d / "REPRODUCE.md").exists()
+                  else f"{m['id']} is not sealed yet: no REPRODUCE.md")
+        elif a.rcmd == "path":
+            print(d)
+        elif a.rcmd == "bundle":
+            got = archive_mod.bundle(store, d, Path(a.dest))
+            print(f"{a.dest}: {got['files']} files, {got['bytes'] / 1e6:.1f} MB"
+                  + (f"; not in the store: {', '.join(got['missing'])}" if got["missing"] else ""))
+        elif a.rcmd == "note":
+            note = {"text": a.text}
+            if a.supersedes:
+                old = store.manifest(store.resolve(a.supersedes))
+                note["supersedes"] = old["id"]
+                store.add_note(old["id"], {"superseded_by": m["id"], "text": a.text})
+            store.add_note(m["id"], note)
+            print(f"noted on {m['id']}" + (f" and {note['supersedes']}" if a.supersedes else ""))
+        return 0
+    except archive_mod.ArchiveError as e:
+        print(f"runs: {e}", file=sys.stderr)
+        return 2
 
 
 # ------------------------------------------------------------------ main ----
@@ -1072,6 +1307,12 @@ def main(argv=None) -> int:
         sp.add_argument("--key", default=os.environ.get("OFFBENCH_KEY"), help="ssh key (default $OFFBENCH_KEY)")
         sp.add_argument("--known-hosts", default=os.environ.get("OFFBENCH_KNOWN_HOSTS"),
                         help="ssh known-hosts file (default $OFFBENCH_KNOWN_HOSTS)")
+        sp.add_argument("--archive", default=None,
+                        help="run archive directory (default $OFFBENCH_ARCHIVE or ~/offbench-runs; 'off' to skip)")
+        sp.add_argument("--tag", action="append", default=[],
+                        help="label the archived run (repeatable; also $OFFBENCH_ARCHIVE_TAGS, comma-separated)")
+        sp.add_argument("--no-archive-binaries", action="store_true",
+                        help="record binaries by sha256 only, without copying them into the archive")
 
     rr = sub.add_parser("repl-run", help="primary/replica write/read split across three or four hosts")
     repl_common(rr, hosts_required=False)
@@ -1131,7 +1372,37 @@ def main(argv=None) -> int:
     rs.add_argument("--run-id"); rs.add_argument("--sweep", action="store_true", help="read-client sweep view")
     rs.set_defaults(fn=cmd_repl_summary)
 
+    ru = sub.add_parser("runs", help="the run archive: list, show, verify, reproduce, bundle, note, import")
+    ru.add_argument("--archive", default=None, help="archive directory (default $OFFBENCH_ARCHIVE or ~/offbench-runs)")
+    rus = ru.add_subparsers(dest="rcmd", required=True)
+    rl = rus.add_parser("list", help="one line per run, oldest first")
+    for flag, kw in (("--scenario", {}), ("--step", {"help": "calibrate | sweep"}), ("--commit", {"help": "valkey or offbench commit prefix"}),
+                     ("--binary", {"help": "sha256 prefix of any binary the run used"}), ("--cores", {"type": int}),
+                     ("--tag", {}), ("--status", {}), ("--label", {"help": "substring of the label"}),
+                     ("--since", {"help": "started at or after, e.g. 2026-10-16"})):
+        rl.add_argument(flag, default=None, **kw)
+    rl.add_argument("--json", action="store_true")
+    rsh = rus.add_parser("show", help="what a run was: scenario, command, harness, binaries, tools, hosts, gaps")
+    rsh.add_argument("ref", help="run id, unique prefix, label or directory"); rsh.add_argument("--json", action="store_true")
+    rv = rus.add_parser("verify", help="check sealed files and objects against their sha256")
+    rv.add_argument("refs", nargs="*"); rv.add_argument("--quick", action="store_true", help="skip the objects")
+    rus.add_parser("reproduce", help="print a run's REPRODUCE.md").add_argument("ref")
+    rus.add_parser("path", help="print a run's directory").add_argument("ref")
+    rb = rus.add_parser("bundle", help="one tar with a run and every object it relies on")
+    rb.add_argument("ref"); rb.add_argument("dest")
+    rn = rus.add_parser("note", help="add a note to a run (kept beside it; the run itself stays sealed)")
+    rn.add_argument("ref"); rn.add_argument("--text", default="")
+    rn.add_argument("--supersedes", default=None, help="the run this one replaces (noted on both)")
+    ri = rus.add_parser("import", help="archive a run recorded before the archive, from its records file")
+    ri.add_argument("records"); ri.add_argument("--label"); ri.add_argument("--calibration"); ri.add_argument("--log")
+    ri.add_argument("--harness-commit", help="the offbench commit that ran it, when known")
+    ri.add_argument("--harness-repo", help="an offbench clone holding that commit (snapshot taken from it)")
+    ri.add_argument("--evidence", help="where the harness commit comes from (a log line, a note)")
+    ri.add_argument("--note", action="append", default=[]); ri.add_argument("--tag", action="append", default=[])
+    ru.set_defaults(fn=cmd_runs)
+
     a = p.parse_args(argv)
+    a._argv = list(argv) if argv is not None else sys.argv[1:]
     return a.fn(a)
 
 
