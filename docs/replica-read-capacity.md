@@ -178,7 +178,8 @@ behind at 200 and 400 readers.
   a `--conns 0` step gets no writers.
 - `--p-conns` is one count for every build; `--bin-p-conns` or the calibration sets it per build.
   `--p-pipeline` is the primary readers' pipeline (default: `--pipelines`).
-- In `--bins`, each `|config value` goes to the replica only.
+- In `--bins`, each `|config value` goes to the replica only, and each `|primary:config value` to the
+  primary only (`lanes=<sha>|keyspace-shard-bits 10|primary:keyspace-shard-bits 10` shards both).
 - `--reader-gen a,b` runs the replica readers on both hosts, each with an even share of every step's
   connections. Their latency merges per second like generators on one host; `reader.threads` and
   `reader.cores` are totals and `reader.parts` holds each host's. Every reader host's round trip

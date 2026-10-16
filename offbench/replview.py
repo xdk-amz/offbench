@@ -36,10 +36,12 @@ def _med(xs) -> Optional[float]:
 
 def match(bin_: dict, builds: list) -> dict:
     """The registry entry a run's build is: the same commit (an entry may give a prefix) and, when the
-    entry names them, the same replica arguments and the same share (main on an IO thread's core)."""
+    entry names them, the same replica and primary arguments and the same share (main on an IO thread's
+    core)."""
     commit = bin_.get("commit") or ""
     hits = [b for b in builds if commit and commit.startswith(b["commit"])
             and ("replica_args" not in b or (bin_.get("replica_args") or "") == b["replica_args"])
+            and ("primary_args" not in b or (bin_.get("primary_args") or "") == b["primary_args"])
             and ("share" not in b or int(bin_.get("share") or 0) == int(b["share"]))]
     if len(hits) != 1:
         raise ViewError(f"build {bin_.get('name')} ({commit[:9] or 'no commit'}) matches {len(hits)} "

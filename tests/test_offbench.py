@@ -1133,6 +1133,39 @@ def test_repl_bin_parse_replica_args():
     assert repl.ReplBin.parse("stock=def").replica_args == ""
 
 
+def test_repl_bin_parse_primary_args():
+    from offbench import repl
+    b = repl.ReplBin.parse("lanes=abc|keyspace-shard-bits 10|primary:keyspace-shard-bits 10|primary: maxclients 9000")
+    assert b.replica_args == "--keyspace-shard-bits 10"
+    assert b.primary_args == "--keyspace-shard-bits 10 --maxclients 9000"
+    assert repl.ReplBin.parse("stock=def|keyspace-shard-bits 10").primary_args == ""
+
+
+def test_repl_run_one_sends_primary_args_to_the_primary_only(monkeypatch):
+    from offbench import repl
+    from offbench.cell import CLK_TCK
+    monkeypatch.setattr(repl.time, "sleep", lambda s: None)
+    pa = {"total_commands_processed": "0", "cmdstat_set": "calls=0,usec=1", "master_repl_offset": "10000000",
+          "sync_full": "1", "connected_clients": "2400", "used_active_time_main_thread": "0"}
+    pb = dict(pa, total_commands_processed="12000000", cmdstat_set="calls=12000000,usec=1",
+              used_active_time_main_thread="6.0", master_repl_offset="600000000")
+    ra = {"total_commands_processed": "0", "cmdstat_set": "calls=0", "master_link_status": "up",
+          "master_sync_in_progress": "0", "connected_clients": "2400", "slave_repl_offset": "0"}
+    rb = dict(ra, total_commands_processed="42000000", cmdstat_set="calls=12000000", slave_repl_offset="590000000")
+    ssh = _ReaderHostsSsh({"m4": 40}, {"P": {"a": _snap(0.0, pa), "b": _snap(6.0, pb, main=6 * CLK_TCK)},
+                                       "R": {"a": _snap(0.0, ra), "b": _snap(6.0, rb)}})
+    names = [("primary", "P"), ("replica", "R"), ("gen", "G"), ("rgen", "m4")]
+    roles = {k: repl.Role(n, "", f"10.0.0.{i}") for i, (k, n) in enumerate(names)}
+    cell = repl.ReplCell(16, 100, 16, write_conns=8, write_pipeline=8, p_conns=15, p_pipeline=1)
+    b = repl.ReplBin.parse("lanes=1|keyspace-shard-bits 10|primary:keyspace-shard-bits 8")
+    rec = repl.run_one(ssh, roles, cell, b, 1, window_s=6, all_servers=[], run_id="r", log=lambda m: None)
+    starts = {p["role"]: p for h, p in ssh.calls if p["action"] == "server_start"}
+    assert starts["primary"]["primary_args"] == "--keyspace-shard-bits 8"
+    assert "primary_args" not in starts["replica"]
+    assert starts["replica"]["replica_args"] == "--keyspace-shard-bits 10"
+    assert rec["bin"]["primary_args"] == "--keyspace-shard-bits 8"
+
+
 def test_repl_share_bin_gets_one_more_io_thread_on_the_same_cores():
     from offbench import repl
     c = repl.ReplCell(16, 400, 4, write_conns=16, p_conns=25)

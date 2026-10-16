@@ -61,6 +61,8 @@ ALLOWANCE_FIELDS = ("bw_in_allowance_exceeded", "bw_out_allowance_exceeded",
 LAGGING = "replica fell behind"
 # A rep whose primary delivered its target writes or reads more than this far off is invalid.
 DRIFT_TOL = 0.07
+# In a --bins spec, a |config with this prefix goes to the primary instead of the replica.
+PRIMARY_CFG = "primary:"
 
 
 def reader_roles(n: int) -> list[str]:
@@ -249,6 +251,8 @@ def agent(a: dict) -> dict:
         extra = "--repl-diskless-sync-delay 0"
         if a["role"] == "replica" and a.get("replica_args"):
             extra += " " + a["replica_args"]
+        if a["role"] == "primary" and a.get("primary_args"):
+            extra += " " + a["primary_args"]
         argv = server_cmd(Path(a["server"]), cell, log, extra, bind=f"127.0.0.1 {a['bind_ip']}")
         pat = _srv_pat(a["server"])
         assert_none(pat, "valkey-server")
@@ -449,6 +453,7 @@ class ReplBin:
     p_conns: int = 0
     write_pipeline: int = 0
     p_pipeline: int = 0
+    primary_args: str = ""  # extra server arguments on the primary only
 
     def cell_for(self, c: ReplCell) -> ReplCell:
         if self.share:
@@ -459,10 +464,14 @@ class ReplBin:
 
     @classmethod
     def parse(cls, spec: str) -> "ReplBin":
-        """name=sha[|config value|config value...]; the configs go to the replica only."""
+        """name=sha[|config value|primary:config value...]; a config goes to the replica, or to the primary
+        when it starts with primary:."""
         name, rest = spec.split("=", 1)
         commit, *cfg = rest.split("|")
-        return cls(name, commit, " ".join(f"--{c.strip()}" for c in cfg if c.strip()))
+        cfg = [c.strip() for c in cfg if c.strip()]
+        prim = [c[len(PRIMARY_CFG):].strip() for c in cfg if c.startswith(PRIMARY_CFG)]
+        rep = [c for c in cfg if not c.startswith(PRIMARY_CFG)]
+        return cls(name, commit, " ".join(f"--{c}" for c in rep), primary_args=" ".join(f"--{c}" for c in prim))
 
     @property
     def server(self) -> str:
@@ -708,7 +717,8 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
         ssh.call(h, {"action": "clean", "servers": all_servers})
     common = {"io_threads": cell.io_threads, "acl": cell.acl, "pin": cell.pin, "server": b.server,
               "pin_share": cell.pin_share}
-    pp = ssh.call(P, {"action": "server_start", "role": "primary", "bind_ip": P.ip, **common})
+    pp = ssh.call(P, {"action": "server_start", "role": "primary", "bind_ip": P.ip,
+                      "primary_args": b.primary_args, **common})
     rp = ssh.call(R, {"action": "server_start", "role": "replica", "bind_ip": R.ip, "primary_ip": P.ip,
                       "replica_args": b.replica_args, **common})
 

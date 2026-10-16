@@ -1079,7 +1079,8 @@ def main(argv=None) -> int:
                     help="repl-calibrate's .json: sets the hosts, builds, cores and each build's primary load, and "
                          "judges every rep against its targets")
     rr.add_argument("--bins", default=None, help="name=fullsha[|config value...],... (built under ~/offbench/builds "
-                                                 "on the hosts; the |configs go to the replica only)")
+                                                 "on the hosts; a |config goes to the replica, a "
+                                                 "|primary:config to the primary)")
     rr.add_argument("--pipelines", default="1,16", help="replica reader pipeline (list)")
     rr.add_argument("--conns", default="2400,7000", help="replica reader connections (list)")
     rr.add_argument("--iot", default=None, help="io-threads, one per core (list; default 2,4,8,16)")
