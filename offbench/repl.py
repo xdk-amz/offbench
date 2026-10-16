@@ -359,7 +359,8 @@ def agent(a: dict) -> dict:
 
     if act == "gen_start":
         cell = Cell(workload=a["workload"], pipeline=a["pipeline"], conns=a["conns"],
-                    keys=a["keys"], value_size=a["value_size"], acl=a.get("acl", 0), pin=1)
+                    keys=a["keys"], value_size=a["value_size"], acl=a.get("acl", 0), pin=1,
+                    rate=int(a.get("rate") or 0))
         toml = WORK / f"{a['name']}.toml"
         text = cachecannon_toml(cell, window_s=a["window_s"], threads=a["threads"], cpu_list=a["cpus"],
                                 endpoint=f"{a['target_ip']}:{PORT}", prefill=a["prefill"], duration_s=a["duration_s"],
@@ -883,6 +884,7 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
     if not started(G, "writer", cell.w_conns,
                    ssh.call(G, {"action": "gen_start", "name": "writer", "workload": "set", "target_ip": P.ip,
                                 "pipeline": cell.w_pipeline, "conns": cell.w_conns, "prefill": True,
+                                "rate": int(os.environ.get("OFFBENCH_W_RATE") or 0),
                                 "cpus": cell.cpus("writer", own)[0],
                                 "threads": cell.threads("writer", own), "duration_s": 240, **gen})):
         raise CellError("writer did not start")
@@ -900,6 +902,7 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
                                     ssh.call(G, {"action": "gen_start", "name": "preader", "workload": "get",
                                                  "target_ip": P.ip, "pipeline": cell.pp_pipeline,
                                                  "conns": cell.p_conns, "prefill": False,
+                                                 "rate": int(os.environ.get("OFFBENCH_P_RATE") or 0),
                                                  "cpus": cell.cpus("preader", own)[0],
                                                  "threads": cell.threads("preader", own),
                                                  "duration_s": 200, **gen})):
