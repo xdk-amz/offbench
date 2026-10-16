@@ -1374,6 +1374,7 @@ mod tls_tests {
             tls_cert_file: None,
             tls_key_file: None,
             cluster: false,
+            readonly: false,
         }
     }
 

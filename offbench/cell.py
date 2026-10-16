@@ -204,7 +204,7 @@ def thread_cpu(a: dict[int, tuple[str, float]], b: dict[int, tuple[str, float]],
 def cachecannon_toml(cell: Cell, window_s: int = 6, warmup_s: int = 3, timeout: str = "1s",
                      threads: Optional[int] = None, nproc: int = 1, cpu_list: Optional[str] = None,
                      endpoint: str = f"{HOST}:{PORT}", prefill: bool = True,
-                     duration_s: Optional[int] = None) -> str:
+                     duration_s: Optional[int] = None, readonly: bool = False) -> str:
     """Emit the cachecannon TOML for a cell. Port of cccell.sh mkcfg.
 
     DIV-5: duration is derived from the window (window_s + 18) so warmup (3) +
@@ -226,6 +226,8 @@ def cachecannon_toml(cell: Cell, window_s: int = 6, warmup_s: int = 3, timeout: 
     ]
     if cell.acl:
         lines += ['auth_user = "bench"', 'auth_password = "benchpw"']
+    if readonly:
+        lines.append("readonly = true")
     lines += [
         "[connection]", f"connections = {cell.conns // nproc}", f"pipeline_depth = {cell.pipeline}",
         f'request_timeout = "{timeout}"',

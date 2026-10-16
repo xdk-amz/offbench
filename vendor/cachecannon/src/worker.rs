@@ -1043,6 +1043,21 @@ async fn resp_connection_task(state: Arc<SharedWorkerState>, endpoint_idx: usize
             }
         }
 
+        if config.target.readonly
+            && let Err(e) = client.cmd(&resp_proto::Request::cmd(b"READONLY")).await
+        {
+            tracing::debug!(
+                worker = state.task_state.worker_id,
+                endpoint = %endpoint,
+                "READONLY failed: {}",
+                e
+            );
+            metrics::CONNECTIONS_ACTIVE.decrement();
+            metrics::CONNECTIONS_FAILED.increment();
+            ringline::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+
         // Precheck: send PING to verify connectivity
         if state.task_state.shared.phase() == Phase::Precheck && !state.is_precheck_done() {
             match client.ping().await {

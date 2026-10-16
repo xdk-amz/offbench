@@ -138,6 +138,10 @@ pub struct Target {
     pub auth_user: Option<String>,
     #[serde(default)]
     pub auth_password: Option<String>,
+    /// Send READONLY on every new RESP connection, after AUTH: a cluster replica then serves the
+    /// connection's reads instead of redirecting them.
+    #[serde(default)]
+    pub readonly: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]

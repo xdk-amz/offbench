@@ -110,6 +110,25 @@ def _cli(*args: str, acl: bool = False) -> str:
     return _run([str(CLI), "-h", "127.0.0.1", "-p", str(PORT), *auth, *args]).stdout
 
 
+def _cluster_join_as_replica(primary_ip: str, acl: bool) -> None:
+    """Cluster mode, one shard: meet the primary (which holds every slot) and replicate it."""
+    auth = ["--user", "bench", "-a", "benchpw", "--no-auth-warning"] if acl else []
+    pid = _run([str(CLI), "-h", primary_ip, "-p", str(PORT), *auth, "cluster", "myid"]).stdout.strip()
+    if len(pid) != 40:
+        raise CellError(f"cluster myid on the primary: {pid!r}")
+    r = _cli("cluster", "meet", primary_ip, str(PORT), acl=acl)
+    if "OK" not in r:
+        raise CellError(f"cluster meet failed: {r.strip()}")
+    deadline = time.time() + 30
+    while pid not in _cli("cluster", "nodes", acl=acl):
+        if time.time() > deadline:
+            raise CellError("replica never learned the primary through the cluster bus")
+        time.sleep(0.2)
+    r = _cli("cluster", "replicate", pid, acl=acl)
+    if "OK" not in r:
+        raise CellError(f"cluster replicate failed: {r.strip()}")
+
+
 def parse_info(text: str) -> dict:
     out: dict = {}
     for line in text.splitlines():
@@ -280,6 +299,10 @@ def agent(a: dict) -> dict:
         log = WORK / f"{a['role']}.log"
         log.unlink(missing_ok=True)
         extra = "--repl-diskless-sync-delay 0"
+        if a.get("cluster"):
+            nodes = WORK / f"nodes-{a['role']}.conf"
+            nodes.unlink(missing_ok=True)
+            extra += f" --cluster-enabled yes --cluster-config-file {nodes} --cluster-node-timeout 15000"
         if a["role"] == "replica" and a.get("replica_args"):
             extra += " " + a["replica_args"]
         if a["role"] == "primary" and a.get("primary_args"):
@@ -317,9 +340,16 @@ def agent(a: dict) -> dict:
                 # the replica authenticates to the primary as the bench user
                 cli_post("config", "set", "masteruser", "bench", acl=True)
                 cli_post("config", "set", "masterauth", "benchpw", acl=True)
-            r = cli_post("replicaof", a["primary_ip"], str(PORT), acl=cell.acl)
+            if a.get("cluster"):
+                _cluster_join_as_replica(a["primary_ip"], acl=cell.acl)
+            else:
+                r = cli_post("replicaof", a["primary_ip"], str(PORT), acl=cell.acl)
+                if "OK" not in r:
+                    raise CellError(f"replicaof failed: {r.strip()}")
+        elif a.get("cluster"):
+            r = cli_post("cluster", "addslotsrange", "0", "16383", acl=cell.acl)
             if "OK" not in r:
-                raise CellError(f"replicaof failed: {r.strip()}")
+                raise CellError(f"cluster addslotsrange failed: {r.strip()}")
         return {"pid": sp, "argv": launch, "post": post, "pins": pins}
 
     if act == "status":
@@ -332,7 +362,8 @@ def agent(a: dict) -> dict:
                     keys=a["keys"], value_size=a["value_size"], acl=a.get("acl", 0), pin=1)
         toml = WORK / f"{a['name']}.toml"
         text = cachecannon_toml(cell, window_s=a["window_s"], threads=a["threads"], cpu_list=a["cpus"],
-                                endpoint=f"{a['target_ip']}:{PORT}", prefill=a["prefill"], duration_s=a["duration_s"])
+                                endpoint=f"{a['target_ip']}:{PORT}", prefill=a["prefill"], duration_s=a["duration_s"],
+                                readonly=bool(a.get("readonly")))
         toml.write_text(text)
         out, err = WORK / f"{a['name']}.json", WORK / f"{a['name']}.err"
         launch = ["taskset", "-c", a["cpus"], "setsid", "-f", str(CACHECANNON), str(toml)]
@@ -809,8 +840,9 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
     acl = bool(cell.acl)
     for h in roles.values():
         ssh.call(h, {"action": "clean", "servers": all_servers})
+    cluster = os.environ.get("OFFBENCH_CLUSTER") == "1"
     common = {"io_threads": cell.io_threads, "acl": cell.acl, "pin": cell.pin, "server": b.server,
-              "pin_share": cell.pin_share}
+              "pin_share": cell.pin_share, "cluster": cluster}
     pp = ssh.call(P, {"action": "server_start", "role": "primary", "bind_ip": P.ip,
                       "primary_args": b.primary_args, **common})
     rp = ssh.call(R, {"action": "server_start", "role": "replica", "bind_ip": R.ip, "primary_ip": P.ip,
@@ -860,6 +892,7 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
         if not started(h, "reader", n,
                        ssh.call(h, {"action": "gen_start", "name": "reader", "workload": "get", "target_ip": rt.ip,
                                     "pipeline": cell.pipeline, "conns": n, "prefill": False,
+                                    "readonly": cluster and rt is R,
                                     "cpus": cell.cpus("reader", own)[0], "threads": min(reader_cap, n),
                                     "duration_s": 200, **gen})):
             raise CellError(f"reader did not start on {h.name}")
