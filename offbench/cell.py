@@ -312,6 +312,93 @@ def parse_perf_stat(text: str, cmds: float) -> Perf:
     )
 
 
+def info_text(paths: Paths, section: str, acl: bool = False) -> dict:
+    """Parse a whole INFO <section> into {field: value}. Used to snapshot the
+    fastpath staged_* fields and commandstats at the window edges."""
+    out: dict = {}
+    for line in cli(paths, "info", section, acl=acl).splitlines():
+        k, sep, v = line.strip().partition(":")
+        if sep and not k.startswith("#"):
+            out[k] = v
+    return out
+
+
+# main-wall parts and worker phases, same names the staged INFO fastpath exposes.
+# streamwait is the time main blocks at the stream close; stream is the client
+# reply-streaming worker phase.
+STAGED_MAIN_PARTS = ("beforesleep", "poll", "read", "exec", "events", "aof",
+                     "streamwait", "reply", "finish", "crons")
+STAGED_PHASES = ("read", "reply", "stream", "sync", "drain", "apply")
+
+
+def staged_split(fp_a: dict, fp_b: dict) -> Optional[dict]:
+    """Delta of every staged_* INFO fastpath counter over the window, plus the
+    derived main-wall per-pass split (each staged_main_<part>_us as a fraction of
+    the total main wall) and the per-phase critical/worker us. None when the
+    server reports no staged_* fields (not a staged build).
+
+    staged_stream_phases is surfaced at top level so a reader can tell whether
+    client reply streaming engaged. The reported main split is
+    read / exec / streamwait / reply / other per iteration."""
+    keys = sorted(k for k in fp_b if k.startswith("staged_"))
+    if not keys:
+        return None
+
+    def iv(info, k):
+        try:
+            return int(info.get(k) or 0)
+        except (TypeError, ValueError):
+            return None
+
+    fields = {}
+    for k in keys:
+        va, vb = iv(fp_a, k), iv(fp_b, k)
+        fields[k] = {"a": va, "b": vb, "delta": (vb - va) if (va is not None and vb is not None) else None}
+
+    def d(part_key):
+        return (fields.get(part_key) or {}).get("delta") or 0
+
+    iters = d("staged_iterations")
+    main_parts_us = {p: d(f"staged_main_{p}_us") for p in STAGED_MAIN_PARTS}
+    total_us = sum(main_parts_us.values())
+    main_pct = {p: (100.0 * main_parts_us[p] / total_us if total_us else None) for p in STAGED_MAIN_PARTS}
+    main_us_per_iter = {p: (main_parts_us[p] / iters if iters else None) for p in STAGED_MAIN_PARTS}
+    phases = {ph: {"phases": d(f"staged_{ph}_phases"),
+                   "worker_us": d(f"staged_{ph}_worker_us"),
+                   "critical_us": d(f"staged_{ph}_critical_us")} for ph in STAGED_PHASES}
+    return {
+        "fields": fields,
+        "iterations": iters,
+        "main_parts_us": main_parts_us,
+        "main_total_us": total_us,
+        "main_pct": main_pct,
+        "main_us_per_iter": main_us_per_iter,
+        "phases": phases,
+        "stream_phases": d("staged_stream_phases"),
+        "us_per_iter": (total_us / iters if iters else None),
+        "streamed": d("staged_stream_phases") > 0,
+    }
+
+
+def cmdstats_delta(cs_a: dict, cs_b: dict) -> dict:
+    """calls and usec deltas for get and set over the window, plus ns/call for
+    each. GET mixes main-executed and IO-thread-executed GETs; SET is main-only.
+    None entries where the command had no calls."""
+    def parse(cs, cmd):
+        raw = cs.get(f"cmdstat_{cmd}", "")
+        calls = re.search(r"calls=(\d+)", raw)
+        usec = re.search(r"usec=(\d+)", raw)
+        return (int(calls.group(1)) if calls else 0, int(usec.group(1)) if usec else 0)
+
+    out = {}
+    for cmd in ("get", "set"):
+        ca, ua = parse(cs_a, cmd)
+        cb, ub = parse(cs_b, cmd)
+        dc, du = cb - ca, ub - ua
+        out[cmd] = {"calls": dc, "usec": du, "ns_call": round(du * 1000.0 / dc, 1) if dc else None}
+    return out
+
+
 def _cpuset(spec: str) -> set[int]:
     """'1-2' and '1,2' name the same cpus."""
     out: set[int] = set()
@@ -449,6 +536,10 @@ def run_rep(paths: Paths, cell: Cell, *, window_s: int = 6, perf: bool = False, 
     a_cpu = thread_cpu_ticks(sp)
     a_cc = proc_cpu_ticks(cc_pids)
     a_thr = thread_ticks(sp)
+    # Window-open snapshots of the staged INFO fastpath and commandstats, so the
+    # per-rep record carries the main-wall split and SET/GET ns/call as deltas.
+    a_fp = info_text(paths, "fastpath", acl=cell.acl)
+    a_cs = info_text(paths, "commandstats", acl=cell.acl)
 
     perf_text = ""
     if perf:
@@ -463,6 +554,9 @@ def run_rep(paths: Paths, cell: Cell, *, window_s: int = 6, perf: bool = False, 
     b_cpu = thread_cpu_ticks(sp)
     b_cc = proc_cpu_ticks(cc_pids)
     b_thr = thread_ticks(sp)
+    # Window-close snapshots paired with a_fp / a_cs above.
+    b_fp = info_text(paths, "fastpath", acl=cell.acl)
+    b_cs = info_text(paths, "commandstats", acl=cell.acl)
     cc_threads_n = sum(len(os.listdir(f"/proc/{p}/task")) for p in cc_pids if Path(f"/proc/{p}/task").exists())
     clients = info_int(paths, "clients", "connected_clients", acl=cell.acl)
     fp_batches = info_int(paths, "all", "fastpath_batches", acl=cell.acl)
@@ -506,4 +600,6 @@ def run_rep(paths: Paths, cell: Cell, *, window_s: int = 6, perf: bool = False, 
         latency=latency,
         server_cpu_cores=round(sum(thr.values()) / 100.0, 2) if thr else None,
         thread_cpu_pct=thr or None,
+        staged=staged_split(a_fp, b_fp),
+        cmdstats=cmdstats_delta(a_cs, b_cs),
     )

@@ -2099,3 +2099,82 @@ def test_staged_and_repl_sender_fields_none_when_absent():
          "ticks": {"main": 0.0, "io": 0.0}, "ena": {k: 0 for k in repl.ALLOWANCE_FIELDS}}
     m = repl.server_metrics({"a": a, "b": b})
     assert m["staged"] is None and m["repl_sender"] is None
+
+
+# ----------------------------------------------- throughput cell staged capture ----
+
+def test_cell_staged_split_main_wall_and_stream():
+    from offbench import cell
+    # One field per staged_main_<part>_us, two iterations' worth, plus the stream
+    # phase advancing. a=0 everywhere, b carries the deltas.
+    a = {f"staged_main_{p}_us": "0" for p in cell.STAGED_MAIN_PARTS}
+    a.update({"staged_iterations": "0", "staged_stream_phases": "0",
+              "staged_stream_critical_us": "0", "staged_reply_critical_us": "0"})
+    b = dict(a, staged_iterations="100",
+             staged_main_read_us="2000", staged_main_exec_us="5000",
+             staged_main_streamwait_us="500", staged_main_reply_us="1000",
+             staged_main_poll_us="1000", staged_main_beforesleep_us="500",
+             staged_stream_phases="300", staged_stream_critical_us="9000")
+    s = cell.staged_split(a, b)
+    assert s is not None
+    assert s["iterations"] == 100
+    assert s["stream_phases"] == 300 and s["streamed"] is True
+    # main wall total = 2000+5000+500+1000+1000+500 = 10000 us
+    assert s["main_total_us"] == 10000
+    assert abs(s["main_pct"]["exec"] - 50.0) < 1e-6
+    assert abs(s["main_pct"]["streamwait"] - 5.0) < 1e-6
+    assert abs(s["main_us_per_iter"]["exec"] - 50.0) < 1e-6   # 5000us / 100 iters
+    assert s["phases"]["stream"]["critical_us"] == 9000
+    assert s["fields"]["staged_main_exec_us"] == {"a": 0, "b": 5000, "delta": 5000}
+
+
+def test_cell_staged_split_none_on_non_staged_build():
+    from offbench import cell
+    assert cell.staged_split({"uptime_in_seconds": "5"}, {"uptime_in_seconds": "11"}) is None
+
+
+def test_cell_staged_split_not_streamed_when_phase_flat():
+    from offbench import cell
+    a = {"staged_iterations": "0", "staged_stream_phases": "7"}
+    b = {"staged_iterations": "10", "staged_stream_phases": "7"}
+    s = cell.staged_split(a, b)
+    assert s["stream_phases"] == 0 and s["streamed"] is False
+
+
+def test_cell_cmdstats_delta_ns_call():
+    from offbench import cell
+    # usec is microseconds; ns/call = (delta usec / delta calls) * 1000. Values
+    # chosen so GET lands at 91 ns/call and SET at 165 ns/call (ab-findings P16).
+    a = {"cmdstat_get": "calls=1000,usec=91,usec_per_call=0.091",
+         "cmdstat_set": "calls=200,usec=33,usec_per_call=0.165"}
+    b = {"cmdstat_get": "calls=5000,usec=455,usec_per_call=0.091",
+         "cmdstat_set": "calls=1200,usec=198,usec_per_call=0.165"}
+    d = cell.cmdstats_delta(a, b)
+    assert d["get"]["calls"] == 4000 and d["get"]["usec"] == 364
+    assert d["get"]["ns_call"] == 91.0            # 364us / 4000 calls * 1000 = 91 ns
+    assert d["set"]["calls"] == 1000 and d["set"]["usec"] == 165
+    assert d["set"]["ns_call"] == 165.0
+
+
+def test_cell_cmdstats_delta_zero_calls_is_none():
+    from offbench import cell
+    d = cell.cmdstats_delta({}, {})
+    assert d["get"]["calls"] == 0 and d["get"]["ns_call"] is None
+    assert d["set"]["calls"] == 0 and d["set"]["ns_call"] is None
+
+
+def test_metrics_staged_cmdstats_round_trip_through_record():
+    staged = {"iterations": 100, "stream_phases": 300, "streamed": True,
+              "main_pct": {"exec": 50.0, "streamwait": 5.0},
+              "fields": {"staged_main_exec_us": {"a": 0, "b": 5000, "delta": 5000}}}
+    cmdstats = {"get": {"calls": 4000, "usec": 460000, "ns_call": 115.0},
+                "set": {"calls": 1000, "usec": 192000, "ns_call": 192.0}}
+    r = Record(bin=Bin(name="cand", commit="61b5f017e"), cell=Cell("mixed", 16, 512, io_threads=8),
+               rep=1, metrics=Metrics(kcmd_s=2500.0, main_active_pct=99.0, clients=513,
+                                      staged=staged, cmdstats=cmdstats),
+               source={"kind": "runner"})
+    r2 = Record.from_dict(json.loads(r.to_json()))
+    assert r2.metrics.staged["stream_phases"] == 300
+    assert r2.metrics.staged["main_pct"]["exec"] == 50.0
+    assert r2.metrics.cmdstats["set"]["ns_call"] == 192.0
+    assert r2.valid

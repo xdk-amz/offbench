@@ -89,6 +89,13 @@ class Metrics:
     span_s: Optional[float] = None       # measured counter span the rates divide by
     server_cpu_cores: Optional[float] = None    # CPU of every server thread over the window, in cores
     thread_cpu_pct: Optional[dict] = None       # per server thread (name, tid when names repeat): CPU % over the window
+    # INFO fastpath staged_* deltas over the window plus the derived main-wall
+    # per-pass split; None on a non-staged build. staged_stream_phases is inside
+    # and tells whether client reply streaming engaged this window.
+    staged: Optional[dict] = None
+    # commandstats get/set deltas over the window (calls, usec), so a reader can
+    # compute ns/call for the main-executed SET and the mixed-source GET.
+    cmdstats: Optional[dict] = None
 
 
 @dataclass
