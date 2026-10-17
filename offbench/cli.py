@@ -1133,7 +1133,9 @@ def cmd_runs(a: argparse.Namespace) -> int:
                 notes=a.note, tags=a.tag, scenario_version=a.scenario_version,
                 host_facts=json.loads(Path(a.host_facts).read_text()) if a.host_facts else None,
                 argv=shlex.split(a.argv) if a.argv else None, argv_source=a.argv_source, cwd=a.cwd,
-                driver=Path(a.driver) if a.driver else None)
+                driver=Path(a.driver) if a.driver else None,
+                build_facts=json.loads(Path(a.build_facts).read_text()) if a.build_facts else None,
+                evidence_files=[Path(p) for p in a.evidence_file])
             print(f"imported {run.id}")
             for g in run.manifest.get("gaps") or []:
                 print(f"  gap: {g}")
@@ -1419,8 +1421,14 @@ def main(argv=None) -> int:
     ri.add_argument("--note", action="append", default=[]); ri.add_argument("--tag", action="append", default=[])
     ri.add_argument("--scenario-version", type=int, default=None,
                     help="the scenario method version the run used (see the scenario doc); unknown if omitted")
-    ri.add_argument("--host-facts", help='JSON {"source": "...", "hosts": {name: {instance_type, ami_id, ...}}, '
-                                         '"user_data_file": path}: facts found elsewhere, kept as declared')
+    ri.add_argument("--host-facts", help='JSON {"source": "...", "hosts": {name: {instance_type, ami_id, az, '
+                                         'placement_group, user, user_data: path or null, ...}}}: facts found '
+                                         'elsewhere, kept as declared')
+    ri.add_argument("--build-facts", help='JSON {"source": "...", "builds": {name: {server_md5, on: [hosts]}}}: '
+                                          "facts about the builds' binaries found elsewhere, kept as declared")
+    ri.add_argument("--evidence-file", action="append", default=[],
+                    help="a log or input that shows where the command or harness commit comes from; archived "
+                         "with the run (repeatable)")
     ri.add_argument("--argv", help="the command the run used, as one shell-quoted string (from its driver)")
     ri.add_argument("--argv-source", help="where --argv comes from")
     ri.add_argument("--cwd", help="the directory the command ran in")

@@ -196,7 +196,9 @@ def _harness(m: dict, archive, run_dir: Path) -> list:
                  + (", with uncommitted changes" if h.get("dirty") else "")
                  + ", exactly as it ran: `HARNESS.json` in it lists every file's sha256. Run every command below "
                    "from that directory: it is the repository root, the same tree a clone gives, with the Python "
-                   "package in its `offbench/` subdirectory.")
+                   "package in its `offbench/` subdirectory."
+                 + (" The `runs` commands are not in it: run those from `offbench-tools` (see the top)."
+                    if (h.get("has") or {}).get("offbench/archive.py") is False else ""))
         if h.get("remote") and h.get("commit") and h.get("remote_branches_with_commit"):
             L += ["", f"The same with git: `git clone {h['remote']} offbench && git -C offbench checkout {h['commit']}`"
                   + (f", then `gzip -dc {_rel(archive, run_dir, h['diff_object'])} | git -C offbench apply` for the "
@@ -252,7 +254,10 @@ def _binaries(m: dict, archive, run_dir: Path) -> list:
     for b in m.get("builds") or []:
         path = b.get("server_path") or f"~/offbench/builds/{b.get('commit')}/src/valkey-server"
         if not b.get("binaries"):
-            missing.append(f"valkey-server {b['name']} (commit {b.get('commit')})")
+            d = b.get("declared") or {}
+            missing.append(f"valkey-server {b['name']} (commit {b.get('commit')}"
+                           + (f"; it had md5 `{d['server_md5']}` on {', '.join(d.get('on') or ['the server hosts'])}"
+                              if d.get("server_md5") else "") + ")")
         for g in b.get("binaries") or []:
             obj = f"`{_rel(archive, run_dir, g['sha256'])}`" if g.get("archived") else "not archived"
             rows.append([", ".join(g.get("roles") or []), f"`{path}`", obj, f"`{g['sha256']}`",
@@ -276,7 +281,15 @@ def _binaries(m: dict, archive, run_dir: Path) -> list:
     if missing:
         L.append("Not archived, so build these (below): " + "; ".join(missing) + ".")
         L.append("")
-    L.append("To build instead of copying: a new build differs in its build id, so compare `.text` sizes, not sha256.")
+    md5s = [b for b in m.get("builds") or [] if not b.get("binaries") and (b.get("declared") or {}).get("server_md5")]
+    if md5s:
+        L += [f"The md5 of {', '.join(b['name'] for b in md5s)} was not recorded by the run; it comes from "
+              f"{md5s[0]['declared'].get('source') or 'the import'}. It names the binary that ran: `md5sum` a binary "
+              "to tell whether it is that one. A rebuild gets its own build id, so it will not match.", ""]
+    recorded = any(b.get("binaries") for b in m.get("builds") or [])
+    L.append("To build instead of copying: a new build differs in its build id, so compare `.text` sizes, not sha256."
+             if recorded else "To build: no binary of this run was recorded, so a rebuild matches it only by commit "
+                              "and build command, as below; there is nothing to compare its bytes or sizes with.")
     for b in m.get("builds") or []:
         g = (b.get("binaries") or [{}])[0]
         build = g.get("build") or {}
@@ -361,6 +374,10 @@ def _run(m: dict, run_dir: Path, archive=None) -> list:
         L += [f"The run did not record its command; this one is from {cmd['source']}"
               + (f" The driver script is archived: `gzip -dc {_rel(archive, run_dir, cmd['driver']['object'])}`."
                  if archive is not None and (cmd.get("driver") or {}).get("object") else ""), ""]
+    ev = cmd.get("evidence_files") or []
+    if ev and archive is not None:
+        L += ["Evidence archived with the run, for the command and the harness commit:", ""]
+        L += [f"- `{e['path']}`: `gzip -dc {_rel(archive, run_dir, e['object'])}`" for e in ev] + [""]
     L += [f"The original command (run from `{cmd.get('cwd') or '?'}`):", "",
           "    python3 -m offbench " + shlex.join(cmd["argv"]), "",
           "With this checkout's paths, in the shell where section 4's three exports are set (the command needs "
@@ -371,6 +388,14 @@ def _run(m: dict, run_dir: Path, archive=None) -> list:
         L += ["The builds' names (" + ", ".join(f"`{n}`" for n in names) + ") are this run's own labels, set by "
               + ("the calibration's `--bins` and carried in `calibration.json`" if inp else "`--bins`")
               + "; the scenario doc's examples may use others.", ""]
+    shared = [b["name"] for b in m.get("builds") or [] if b.get("share")]
+    cores = (m.get("config") or {}).get("cores") or []
+    if shared:
+        one = len(shared) == 1
+        L += [", ".join(f"`{n}`" for n in shared) + " shared main's core (`--share-bins`), so "
+              + ("it" if one else "each") + " ran one IO thread more than the core count"
+              + (f": {'its' if one else 'their'} records show `io_threads` {cores[0] + 1} for {cores[0]} cores"
+                 if len(cores) == 1 else "") + ".", ""]
     if m.get("seconds") is not None:
         s = m["seconds"]
         span = f"{s // 60} min" if s >= 60 else f"{s} s"
@@ -390,7 +415,9 @@ def _run(m: dict, run_dir: Path, archive=None) -> list:
 def _compare(m: dict) -> list:
     label = m.get("label") or "run"
     if (m.get("command") or {}).get("name") == "repl-calibrate":
-        first = f"Compare the new `data/repl/{label}-repro.json` (targets and each build's `shape`) with `result.txt`."
+        first = (f"Compare `data/repl/{label}-repro.json`, the calibration the command writes beside its `--out` "
+                 "file (targets and each build's `shape`), with `result.txt`. Each build's rates in both are the "
+                 "medians of its valid confirmation reps, writes and reads taken separately.")
     else:
         first = (f"    python3 -m offbench repl-capacity data/repl/{label}-repro.jsonl\n\n"
                  "and set its table beside `result.txt`. For each build it reports the highest median replica read "
@@ -439,13 +466,16 @@ def reproduce_md(m: dict, run_dir: Path, archive) -> str:
     L = [f"# Reproduce {m['id']}", "", f"> {sc.get('question', '')}", "",
          f"This directory is one run: step `{sc.get('step')}` of scenario `{sc.get('name')}` ({version}). The "
          f"scenario is defined in `{sc.get('doc')}` of the harness below."
-         + (" That copy predates the list of the scenario's versions; `offbench-tools` (below) has it." if old else "")
+         + (" That copy, the one this run used, predates the list of the scenario's versions; `offbench-tools` "
+            "(below) has a later revision of the doc that lists them. Take only the version list from it."
+            if old else "")
          + f" It ran from {m.get('started')} to "
          f"{m.get('ended')} and ended `{m.get('status')}`. `result.txt` holds its result, `records.jsonl` its "
          f"{o.get('records', 0)} reps ({o.get('valid', 0)} valid), and `manifest.json` every detail used here.", "",
          "Commands below refer to this directory as `$RUN`, and to the archive's objects relative to it. Set it "
-         "first (this is where the run was archived; use its new place if the archive moved):", "",
+         "first, to this directory's path on your machine. Where it was archived:", "",
          f"    RUN={run_dir}", "",
+         f"From an unpacked bundle, in the directory you unpacked it into: `RUN=$PWD/runs/{m['id']}`.", "",
          "The archive is `\"$RUN\"/../..`. The `runs` commands read it only when given `--archive \"$RUN\"/../..`; "
          "without it they read `$OFFBENCH_ARCHIVE` or `~/offbench-runs`."
          + ("" if old else " For example, from the harness of section 3: "

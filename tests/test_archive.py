@@ -496,7 +496,7 @@ def test_reproduce_md_names_hosts_tools_binaries_and_the_exact_command(tmp_path,
                  f"runs --archive \"$RUN\"/../.. show {m['id']}", "in the shell where section 4's three exports are set",
                  "This run had no host of its own for the replica readers", "the file `--calibration` reads",
                  "For example, from the harness of section 3: ", "ssh-keyscan -t ed25519,ecdsa",
-                 "set by the calibration's `--bins` and carried in `calibration.json`"):
+                 "set by the calibration's `--bins` and carried in `calibration.json`", "compare `.text` sizes"):
         assert want in doc, want
     assert "offbench-tools" not in doc and "predates the archive" not in doc
     assert "/keys/bench.pem" not in doc.split("The original command")[1].split("With this checkout")[1]
@@ -519,6 +519,10 @@ def test_calibrate_targets_advice_only_when_the_command_lacks_them(tmp_path):
     assert "add `--targets 861.2020868141763,538.25`" in "\n".join(reproduce._run(m, tmp_path))
     m["command"]["argv"] += ["--targets", "861.2,538.2"]
     assert "To search again" not in "\n".join(reproduce._run(m, tmp_path))
+    assert "medians of its valid confirmation reps" in "\n".join(reproduce._compare(m))
+    m.update(builds=[{"name": "staged", "share": 1}], config={"cores": [8]})
+    assert ("`staged` shared main's core (`--share-bins`), so it ran one IO thread more than the core count: its "
+            "records show `io_threads` 9 for 8 cores.") in "\n".join(reproduce._run(m, tmp_path))
 
 
 def test_runs_cli_lists_shows_verifies_bundles_and_notes(tmp_path, rig, capsys):
@@ -643,24 +647,36 @@ def test_import_with_declared_facts_command_and_version_tells_the_operator_what_
                        for h in ("metal-2", "metal-7", "metal-8", "metal-4", "metal-5")}}
     argv = ["repl-run", "--calibration", "/x/c16-calib.json", "--conns", "0,50", "--pipelines", "16", "--reps", "3",
             "--out", "/x/c16.jsonl"]
+    log = tmp_path / "rerun16.out"
+    log.write_text("RERUN16_START abc\n")
     run = archive.import_records(store, src, label="c16", harness_commit=commit, harness_repo=root,
                                  evidence="rerun16.out", scenario_version=1, host_facts=facts, argv=argv,
                                  argv_source="rerun16.sh, the driver that ran it", cwd="/x/offbench-matrix",
-                                 driver=driver)
+                                 driver=driver, evidence_files=[log],
+                                 build_facts={"source": "driver.py's preflight", "builds": {
+                                     "stock": {"server_md5": "ac8ad6f9f284c85ee887ffdc0d8e6666", "on": ["metal-2"]}}})
     m = store.manifest(run.dir)
     assert m["seconds"] == 1680 and m["scenario"]["method"].startswith("every build's writers")
     assert m["scenario"]["version_given_at_import"] and m["command"]["argv"] == argv
     assert m["rig"]["roles"]["rgen2"]["declared"]["instance_type"] == "c8g.metal-24xl"
     assert m["harness"]["has"]["offbench/archive.py"] is False and m["config"]["pinned"] is True
     assert {w for _, w in archive.objects_of(m)} >= {"driver script", "host user data", "harness snapshot",
-                                                     "offbench that imported the run"}
+                                                     "offbench that imported the run", "evidence file"}
     assert m["archived_by"]["has"]["offbench/archive.py"] is True
+    assert m["builds"][0]["declared"] == {"server_md5": "ac8ad6f9f284c85ee887ffdc0d8e6666", "on": ["metal-2"],
+                                          "source": "driver.py's preflight"}
+    assert "declared md5 ac8ad6f9f284c85ee887ffdc0d8e6666 on metal-2" in archive.show(m)
     doc = (run.dir / "REPRODUCE.md").read_text()
     for want in ("version 1, assigned when it was imported: every build's writers",
                  "This run's harness (section 3) predates the archive: it has no `runs` commands",
                  "    mkdir offbench-tools && gzip -dc \"$RUN\"/../../objects/",
                  "`cd offbench-tools && python3 -m offbench runs --archive \"$RUN\"/../.. show ",
-                 "That copy predates the list of the scenario's versions",
+                 "That copy, the one this run used, predates the list of the scenario's versions",
+                 "Take only the version list from it.",
+                 "it had md5 `ac8ad6f9f284c85ee887ffdc0d8e6666` on metal-2",
+                 "it comes from driver.py's preflight. It names the binary that ran",
+                 "Evidence archived with the run, for the command and the harness commit:",
+                 f"- `{log.resolve()}`: `gzip -dc \"$RUN\"/../../objects/",
                  "they come from aws ec2 describe-instances after the run", "c8g.metal-24xl", "ami-0fa4996c14e7d501e",
                  "al2023-ami-2023.12.20260909.0-kernel-6.1-arm64", "placement group originally none",
                  "split evenly across 2 hosts", "Log in as `ec2-user`", "- User data of rgen, rgen2: `gzip -dc",
@@ -672,7 +688,10 @@ def test_import_with_declared_facts_command_and_version_tells_the_operator_what_
                  "its release fixes the package repository", "this one is from rerun16.sh, the driver that ran it",
                  "The driver script is archived", "--calibration data/repl/c16-calib.json",
                  "Every rep of this run was pinned", "the new run is not archived",
-                 "Its records span 28 min, first rep to last"):
+                 "Its records span 28 min, first rep to last",
+                 "From an unpacked bundle, in the directory you unpacked it into: `RUN=$PWD/runs/",
+                 "The `runs` commands are not in it: run those from `offbench-tools` (see the top).",
+                 "no binary of this run was recorded, so a rebuild matches it only by commit"):
         assert want in doc, want
     assert "known_hosts.example" not in doc and "newer harnesses" not in doc
     assert "archived_by.snapshot.object" in archive.ARCHIVE_MD

@@ -824,6 +824,9 @@ def objects_of(m: dict) -> list:
     drv = (m.get("command") or {}).get("driver") or {}
     if drv.get("object"):
         out.append((drv["object"], "driver script"))
+    for e in (m.get("command") or {}).get("evidence_files") or []:
+        if e.get("object"):
+            out.append((e["object"], "evidence file"))
     ud = (m.get("rig") or {}).get("user_data") or {}
     if ud.get("object"):
         out.append((ud["object"], "host user data"))
@@ -841,7 +844,8 @@ def objects_of(m: dict) -> list:
         for g in t.get("binaries") or []:
             if g.get("archived"):
                 out.append((g["sha256"], name))
-    return out
+    seen: set = set()
+    return [(s, w) for s, w in out if not (s in seen or seen.add(s))]
 
 
 def verify(archive: Archive, run_dir: Path, objects: bool = True) -> list:
@@ -952,6 +956,8 @@ def show(m: dict, notes: list = (), run_dir: Optional[Path] = None) -> str:
             L.append(f"          from {cmd['source']} (not recorded by the run)")
         if (cmd.get("driver") or {}).get("object"):
             L.append(f"          driver {cmd['driver']['path']}, archived as object {_short(cmd['driver']['object'], 16)}")
+        for e in cmd.get("evidence_files") or []:
+            L.append(f"          evidence {e['path']}, archived as object {_short(e['object'], 16)}")
     if h:
         state = "dirty" if h.get("dirty") else "clean" if h.get("dirty") is False else "state unknown"
         snap = h.get("snapshot") or {}
@@ -990,7 +996,9 @@ def show(m: dict, notes: list = (), run_dir: Optional[Path] = None) -> str:
                                     b.get("share") and "main shares a core") if x)
         L.append(f"build     {b['name']}: valkey {b.get('commit')}" + (f" ({args})" if args else ""))
         if not b.get("binaries"):
-            L.append("            binary not recorded")
+            d = b.get("declared") or {}
+            L.append("            binary not recorded" + (f"; declared md5 {d['server_md5']} on "
+                                                          f"{', '.join(d.get('on') or ['?'])}" if d.get("server_md5") else ""))
         for g in b.get("binaries") or []:
             L += _binary_lines(g, "            ")
         s = b.get("source")
@@ -1044,14 +1052,17 @@ def import_records(archive: Archive, records: Path, *, label: Optional[str] = No
                    evidence: Optional[str] = None, notes: list = (), tags=(),
                    scenario_version: Optional[int] = None, host_facts: Optional[dict] = None,
                    argv: Optional[list] = None, argv_source: Optional[str] = None, cwd: Optional[str] = None,
-                   driver: Optional[Path] = None) -> Run:
+                   driver: Optional[Path] = None, build_facts: Optional[dict] = None,
+                   evidence_files: tuple = ()) -> Run:
     """Archive a run recorded before the archive existed, from its records file (and calibration and log). What
     the records do not say (binaries, host facts, tool versions) is listed under gaps, not guessed; so is the
     scenario version, unless the importer gives it.
 
     host_facts: {"source": how they were found, "hosts": {host name: facts}}, kept per role under `declared`,
     apart from observed facts. argv: the command as the importer found it (argv_source says where); driver: the
-    script that ran it, archived as an object."""
+    script that ran it, archived as an object. build_facts: {"source", "builds": {build name: facts}}, kept per
+    build under `declared` (e.g. the server binary's md5 a driver checked). evidence_files: logs and inputs that
+    show where the command and harness commit come from, archived as objects."""
     from . import repl, replcap
     archive.ensure()
     records = Path(records)
@@ -1087,6 +1098,14 @@ def import_records(archive: Archive, records: Path, *, label: Optional[str] = No
     if driver and Path(driver).exists():
         m["command"]["driver"] = {"path": str(Path(driver).resolve()), "object": archive.put_file(driver),
                                   "note": "the script's content when the run was imported"}
+    ev = []
+    for p in evidence_files or ():
+        if Path(p).exists():
+            ev.append({"path": str(Path(p).resolve()), "object": archive.put_file(p), "bytes": Path(p).stat().st_size})
+        else:
+            run.gap(f"evidence file {p} not found at import")
+    if ev:
+        m["command"]["evidence_files"] = ev
     missing = "host facts, binary hashes and tool versions" + ("" if argv else ", and the command line,")
     run.gap(f"recorded before the archive: {missing} were not captured at the time")
     m["scenario"]["version_given_at_import"] = scenario_version is not None
@@ -1136,6 +1155,12 @@ def import_records(archive: Archive, records: Path, *, label: Optional[str] = No
     m["builds"] = [{"name": n, "commit": b.get("commit"), "server_path": f"~/offbench/builds/{b.get('commit')}/src/valkey-server",
                     "replica_args": b.get("replica_args", ""), "primary_args": b.get("primary_args", ""),
                     "share": b.get("share", 0), "binaries": [], "source": None} for n, b in seen.items()]
+    bf = (build_facts or {}).get("builds") or {}
+    for b in m["builds"]:
+        if b["name"] in bf:
+            b["declared"] = dict(bf[b["name"]], source=build_facts.get("source"))
+    if set(bf) - set(seen):
+        run.gap(f"build facts for builds this run did not have: {', '.join(sorted(set(bf) - set(seen)))}")
     m["tools"] = {"cachecannon": dict((h or {}).get("cachecannon_source") or {}, binaries=[]),
                   "valkey-cli": {"source": "any valkey build; only the control connection uses it", "binaries": []}}
     cells = [r["cell"] for r in recs if r.get("cell")]
