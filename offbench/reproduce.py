@@ -132,8 +132,8 @@ def _hosts(m: dict, archive, run_dir: Path) -> list:
     cpu = f0.get("cpu") or {}
     L.append("- CPUs: " + (f"{cpu.get('Model name') or cpu.get('Model') or '?'}, {cpu.get('count')} of them, "
                            f"{(f0.get('mem_kb') or 0) / 1048576:.0f} GiB. " if cpu else "not recorded. ")
-             + "The harness's CPU layout assumes 96: cpu 0 housekeeping, cpu 1 main, IO threads from cpu 2, IRQs on "
-               "17-32, generators on 33-95.")
+             + "The harness's CPU layout assumes 96 (check `nproc` on each new host): cpu 0 housekeeping, cpu 1 main, "
+               "IO threads from cpu 2, IRQs on 17-32, generators on 33-95.")
     users = sorted({fact(r, lambda f: (f.get("host") or {}).get("user"), "user") or r.get("ssh_user") or "?"
                     for r in roles.values()})
     L.append(f"- Log in as `{', '.join(users)}`: the harness works under that user's home (`~/offbench`, "
@@ -415,9 +415,10 @@ def _run(m: dict, run_dir: Path, archive=None) -> list:
 def _compare(m: dict) -> list:
     label = m.get("label") or "run"
     if (m.get("command") or {}).get("name") == "repl-calibrate":
-        first = (f"Compare `data/repl/{label}-repro.json`, the calibration the command writes beside its `--out` "
-                 "file (targets and each build's `shape`), with `result.txt`. Each build's rates in both are the "
-                 "medians of its valid confirmation reps, writes and reads taken separately.")
+        first = (f"Compare `data/repl/{label}-repro.json` with `result.txt`: the command writes its records to its "
+                 f"`--out` file, `data/repl/{label}-repro.jsonl`, and the calibration (targets and each build's "
+                 "`shape`) beside it as `.json`. Each build's rates in both are the medians of its valid confirmation "
+                 "reps, writes and reads taken separately.")
     else:
         first = (f"    python3 -m offbench repl-capacity data/repl/{label}-repro.jsonl\n\n"
                  "and set its table beside `result.txt`. For each build it reports the highest median replica read "

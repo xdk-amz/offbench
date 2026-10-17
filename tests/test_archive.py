@@ -520,6 +520,7 @@ def test_calibrate_targets_advice_only_when_the_command_lacks_them(tmp_path):
     m["command"]["argv"] += ["--targets", "861.2,538.2"]
     assert "To search again" not in "\n".join(reproduce._run(m, tmp_path))
     assert "medians of its valid confirmation reps" in "\n".join(reproduce._compare(m))
+    assert "`--out` file, `data/repl/c-repro.jsonl`, and the calibration" in "\n".join(reproduce._compare(m))
     m.update(builds=[{"name": "staged", "share": 1}], config={"cores": [8]})
     assert ("`staged` shared main's core (`--share-bins`), so it ran one IO thread more than the core count: its "
             "records show `io_threads` 9 for 8 cores.") in "\n".join(reproduce._run(m, tmp_path))
@@ -688,7 +689,7 @@ def test_import_with_declared_facts_command_and_version_tells_the_operator_what_
                  "its release fixes the package repository", "this one is from rerun16.sh, the driver that ran it",
                  "The driver script is archived", "--calibration data/repl/c16-calib.json",
                  "Every rep of this run was pinned", "the new run is not archived",
-                 "Its records span 28 min, first rep to last",
+                 "Its records span 28 min, first rep to last", "assumes 96 (check `nproc` on each new host)",
                  "From an unpacked bundle, in the directory you unpacked it into: `RUN=$PWD/runs/",
                  "The `runs` commands are not in it: run those from `offbench-tools` (see the top).",
                  "no binary of this run was recorded, so a rebuild matches it only by commit"):
