@@ -61,46 +61,81 @@ def rewrite_argv(argv: list, command: str, label: str) -> list:
     return out
 
 
-def _hosts(m: dict) -> list:
+def _hosts(m: dict, archive, run_dir: Path) -> list:
     L = []
     roles = (m.get("rig") or {}).get("roles") or {}
     if not roles:
         return ["The hosts were not recorded."]
+
+    def fact(r: dict, observed, declared_key: str):
+        f = r.get("facts") or {}
+        v = observed(f) if f else None
+        return v if v not in (None, "") else (r.get("declared") or {}).get(declared_key)
+    inst = lambda k: (lambda f: (f.get("instance") or {}).get(k))
     rows = []
     for role, r in roles.items():
-        f = r.get("facts") or {}
-        i, o = f.get("instance") or {}, f.get("os") or {}
-        rows.append([role, f"`{r.get('host')}`", _use(role), i.get("instance_type"), i.get("ami_id"),
-                     o.get("release") or o.get("pretty"), f.get("kernel")])
-    L.append(f"Launch {len(roles)} hosts like the original ones, one per role, with `scripts/host-userdata.sh` from the "
-             "harness (section 3) as user data:")
+        rows.append([role, f"`{r.get('host')}`", _use(role), fact(r, inst("instance_type"), "instance_type"),
+                     fact(r, inst("ami_id"), "ami_id"),
+                     fact(r, lambda f: (f.get("os") or {}).get("release") or (f.get("os") or {}).get("pretty"), "ami_name"),
+                     fact(r, lambda f: f.get("kernel"), "kernel")])
+    h = m.get("harness") or {}
+    has_ud = (h.get("has") or {}).get("scripts/host-userdata.sh")
+    groups: dict = {}             # user-data object (None: launched without) -> roles, from declared facts
+    for role, r in roles.items():
+        d = r.get("declared") or {}
+        if not r.get("facts") and "user_data" in d:
+            groups.setdefault((d["user_data"] or {}).get("object"), []).append(role)
+    script = ("`scripts/host-userdata.sh` from the harness (section 3)" if has_ud else
+              "`scripts/host-userdata.sh` of a newer offbench checkout (this run's harness predates it)")
+    how = "with the user data below" if groups else f"with {script} as user data"
+    L.append(f"Launch {len(roles)} hosts like the original ones, one per role, {how}:")
     L.append("")
     L += _table(["role", "original host", "used for", "instance type", "AMI", "OS release", "kernel"], rows)
     L.append("")
+    for obj, rs in groups.items():
+        if obj:
+            L.append(f"- User data of {', '.join(rs)}: `gzip -dc {_rel(archive, run_dir, obj)}`.")
+        else:
+            L.append(f"- {', '.join(rs)} had no user data; how they were set up was not recorded. {script[0].upper()}"
+                     f"{script[1:]} gives them the toolchain and limits the other hosts had.")
+    observed = any(r.get("facts") for r in roles.values())
+    declared = any(r.get("declared") for r in roles.values())
+    if not observed and declared:
+        L.append(f"- These host facts were not recorded by the run; they come from {m['rig'].get('declared_source')}.")
+    elif not observed:
+        L.append("- The run did not record its hosts. Take the instance type, AMI and zone from the rig's own records, "
+                 "or match a newer archived run on the same hosts (`runs list`, `runs show`), and note what you used.")
+    readers = [c for c in (m.get("config") or {}).get("replica_reader_conns") or [] if c]
+    rgens = [r for r in roles if r.startswith("rgen")]
+    if readers and not rgens:
+        L.append("- This run had no host of its own for the replica readers: they ran on the gen host. The scenario "
+                 "doc's Setup gives them one (two from 16 cores up); reproduce it as it ran, with the same roles.")
+    elif len(rgens) > 1:
+        L.append(f"- The replica readers were split evenly across {len(rgens)} hosts, as the scenario doc's Setup does "
+                 "from 16 cores up.")
     f0 = next((r.get("facts") for r in roles.values() if r.get("facts")), None) or {}
-    i0 = f0.get("instance") or {}
     rtt = (m.get("rig") or {}).get("rtt_ms") or {}
     gate = ((m.get("command") or {}).get("args") or {}).get("max_rtt_ms")
-    azs = sorted({((r.get("facts") or {}).get("instance") or {}).get("az") or "?" for r in roles.values()})
-    pgs = sorted({((r.get("facts") or {}).get("instance") or {}).get("placement_group") or "none" for r in roles.values()})
-    L.append(f"- One availability zone and one cluster placement group (originally {', '.join(azs)}; placement group "
-             f"{', '.join(pgs)}). The run refuses a generator-to-server round trip over "
-             f"{gate if gate is not None else '0.15'} ms."
+    azs = sorted({fact(r, inst("az"), "az") or "?" for r in roles.values()})
+    pgs = sorted({fact(r, inst("placement_group"), "placement_group") or "none" for r in roles.values()})
+    L.append(f"- Every host in one availability zone (originally {', '.join(azs)}); placement group originally "
+             f"{', '.join(pgs)}. A cluster placement group keeps round trips lowest. The run refuses a "
+             f"generator-to-server round trip over {gate if gate is not None else '0.15'} ms."
              + (" Originally, median ms: " + ", ".join(f"{k} {(v or {}).get('median_ms', float('nan')):.3f}"
                                                         for k, v in rtt.items()) + "." if rtt else ""))
     cpu = f0.get("cpu") or {}
-    if cpu:
-        L.append(f"- CPUs: {cpu.get('Model name') or cpu.get('Model') or '?'}, {cpu.get('count')} of them, "
-                 f"{(f0.get('mem_kb') or 0) / 1048576:.0f} GiB. The harness's CPU layout assumes this count: cpu 0 "
-                 "housekeeping, cpu 1 main, IO threads from cpu 2, IRQs on 17-32, generators on 33-95.")
-    users = sorted({((r.get("facts") or {}).get("host") or {}).get("user") or "?" for r in roles.values()})
+    L.append("- CPUs: " + (f"{cpu.get('Model name') or cpu.get('Model') or '?'}, {cpu.get('count')} of them, "
+                           f"{(f0.get('mem_kb') or 0) / 1048576:.0f} GiB. " if cpu else "not recorded. ")
+             + "The harness's CPU layout assumes 96: cpu 0 housekeeping, cpu 1 main, IO threads from cpu 2, IRQs on "
+               "17-32, generators on 33-95.")
+    users = sorted({fact(r, lambda f: (f.get("host") or {}).get("user"), "user") or r.get("ssh_user") or "?"
+                    for r in roles.values()})
     L.append(f"- Log in as `{', '.join(users)}`: the harness works under that user's home (`~/offbench`, "
              "`~/offbench-src`, `~/base`).")
     clocks = [f"{role} {((r.get('facts') or {}).get('clock') or {}).get('System time', '?')}" for role, r in roles.items()]
     L.append("- Clocks synced by chrony: every host takes its measurement snapshot at the same absolute time, so "
-             f"offsets must stay far below a millisecond. Originally: {'; '.join(clocks)}.")
-    if i0.get("instance_type") is None:
-        L.append("- The instance type and AMI were not recorded.")
+             "offsets must stay far below a millisecond."
+             + (f" Originally: {'; '.join(clocks)}." if observed else " The original offsets were not recorded."))
     return L
 
 
@@ -108,7 +143,15 @@ def _packages(m: dict) -> list:
     roles = (m.get("rig") or {}).get("roles") or {}
     per = {role: (r.get("facts") or {}).get("packages") or {} for role, r in roles.items()}
     if not any(per.values()):
-        return ["Package versions were not recorded. The harness needs: " + ", ".join(NEEDED) + "."]
+        amis = sorted({((r.get("declared") or {}).get("ami_id"), (r.get("declared") or {}).get("ami_name"))
+                       for r in roles.values() if (r.get("declared") or {}).get("ami_id")})
+        L = ["Package versions were not recorded."]
+        if amis:
+            L[0] += (" The hosts ran " + ", ".join(f"{a} ({n})" for a, n in amis) + ": its release fixes the "
+                     "package repository, so installing from it gives the versions the run had, unless the hosts "
+                     "were updated after launch.")
+        return L + ["", "The harness needs: " + ", ".join(NEEDED) + "; the user data in section 1 installs the "
+                    "build toolchain the rig used."]
     have = sorted({p for pk in per.values() for p, v in pk.items() if v and p not in BASE})
     L = ["On every host (the user data does most of this):", "", "    sudo dnf install -y " + " ".join(have), "",
          "Versions the original hosts had (`rpm -q`); the AMI's release pins the repository, so the same AMI gives "
@@ -146,7 +189,8 @@ def _harness(m: dict, archive, run_dir: Path) -> list:
                  + (f" of {h['remote']}" if h.get("remote") else "")
                  + (", with uncommitted changes" if h.get("dirty") else "")
                  + ", exactly as it ran: `HARNESS.json` in it lists every file's sha256. Run every command below "
-                   "from that directory.")
+                   "from that directory: it is the repository root, the same tree a clone gives, with the Python "
+                   "package in its `offbench/` subdirectory.")
         if h.get("remote") and h.get("commit") and h.get("remote_branches_with_commit"):
             L += ["", f"The same with git: `git clone {h['remote']} offbench && git -C offbench checkout {h['commit']}`"
                   + (f", then `gzip -dc {_rel(archive, run_dir, h['diff_object'])} | git -C offbench apply` for the "
@@ -166,7 +210,8 @@ def _harness(m: dict, archive, run_dir: Path) -> list:
 
 def _hosts_file(m: dict) -> list:
     roles = (m.get("rig") or {}).get("roles") or {}
-    users = {role: (((r.get("facts") or {}).get("host") or {}).get("user") or r.get("ssh_user") or "ec2-user")
+    users = {role: (((r.get("facts") or {}).get("host") or {}).get("user") or (r.get("declared") or {}).get("user")
+                    or r.get("ssh_user") or "ec2-user")
              for role, r in roles.items()}
     entries = ",\n".join(f'  {{"name": "{r["host"]}", "ssh": "{users[role]}@<address of the new {role} host>"}}'
                          for role, r in roles.items())
@@ -247,6 +292,14 @@ def _binaries(m: dict, archive, run_dir: Path) -> list:
 def _tuning(m: dict) -> list:
     roles = (m.get("rig") or {}).get("roles") or {}
     tuned = [role for role, r in roles.items() if ((r.get("facts") or {}).get("pintune") or {}).get("applied")]
+    if not any(r.get("facts") for r in roles.values()):
+        L = ["On the server hosts, after every boot:", "", "    sudo bash ~/offbench-src/scripts/pintune.sh", "",
+             "It stops irqbalance and moves IRQs, loopback RPS and unbound kernel work onto CPUs 17-32. The hosts' "
+             "tuning was not recorded."]
+        if (m.get("config") or {}).get("pinned"):
+            L.append("Every rep of this run was pinned, and the harness refuses a pinned rep on a server host without "
+                     "pintune, so the server hosts had it.")
+        return L
     L = [f"On {', '.join(tuned) if tuned else 'the server hosts'} (where the original had it), after every boot:", "",
          "    sudo bash ~/offbench-src/scripts/pintune.sh", "",
          "It stops irqbalance and moves IRQs, loopback RPS and unbound kernel work onto CPUs 17-32. The run checks "
@@ -278,7 +331,7 @@ def _tuning(m: dict) -> list:
     return L
 
 
-def _run(m: dict, run_dir: Path) -> list:
+def _run(m: dict, run_dir: Path, archive=None) -> list:
     cmd = m.get("command") or {}
     name, label = cmd.get("name"), m.get("label") or "run"
     L = []
@@ -292,8 +345,14 @@ def _run(m: dict, run_dir: Path) -> list:
         L.append("The command line was not recorded. `manifest.json` has the configuration the records show "
                  "(`config`), and `records.jsonl` every rep's cell.")
         return L
-    L += [f"The original command (run from `{cmd.get('cwd')}`):", "",
-          "    python3 -m offbench " + shlex.join(cmd["argv"]), "", "With this checkout's paths:", "",
+    if cmd.get("source"):
+        L += [f"The run did not record its command; this one is from {cmd['source']}"
+              + (f" The driver script is archived: `gzip -dc {_rel(archive, run_dir, cmd['driver']['object'])}`."
+                 if archive is not None and (cmd.get("driver") or {}).get("object") else ""), ""]
+    L += [f"The original command (run from `{cmd.get('cwd') or '?'}`):", "",
+          "    python3 -m offbench " + shlex.join(cmd["argv"]), "",
+          "With this checkout's paths, in the shell where section 4's three exports are set (the command needs "
+          "`OFFBENCH_KEY` and `OFFBENCH_KNOWN_HOSTS`, and finds the hosts through `OFFBENCH_HOSTS_FILE`):", "",
           "    python3 -m offbench " + shlex.join(rewrite_argv(cmd["argv"], name, label)), ""]
     if m.get("seconds") is not None:
         s = m["seconds"]
@@ -314,32 +373,50 @@ def _compare(m: dict) -> list:
     else:
         first = (f"    python3 -m offbench repl-capacity data/repl/{label}-repro.jsonl\n\n"
                  "and set its table beside `result.txt`.")
-    return [first, "",
-            "The new run archives itself as well (`python3 -m offbench runs list`). `python3 -m offbench runs show` on "
-            "both runs should agree on the harness snapshot, every binary's sha256 and the host facts above; where "
-            "they differ, that difference is the first suspect for any difference in the numbers."]
+    h = m.get("harness") or {}
+    if (h.get("has") or {}).get("offbench/archive.py") is False:
+        tail = ("This run's harness predates the archive, so the new run is not archived: its records are the "
+                "`--out` file and the `.log` beside it. Compare the builds' commits, the host facts above and the "
+                "result table.")
+    else:
+        tail = ("The new run archives itself under `$OFFBENCH_ARCHIVE` or `~/offbench-runs` (`python3 -m offbench runs "
+                "list`). `runs show` on it and `runs --archive \"$RUN\"/../.. show` on this run should agree on the "
+                "harness snapshot, every binary's sha256 and the host facts above; where they differ, that difference "
+                "is the first suspect for any difference in the numbers.")
+    return [first, "", tail]
 
 
 def reproduce_md(m: dict, run_dir: Path, archive) -> str:
     sc, o = m.get("scenario") or {}, m.get("outputs") or {}
+    h = m.get("harness") or {}
+    v = sc.get("version")
+    given = ", assigned when it was imported" if sc.get("version_given_at_import") else ""
+    version = (f"version {v}{given}: {sc['method']}" if v is not None and sc.get("method")
+               else f"version {v}{given}" if v is not None else "version unknown")
+    where = ("from the harness of section 3" if (h.get("has") or {}).get("offbench/archive.py") is not False
+             else "from a newer offbench checkout (this run's harness predates the archive and has no `runs`)")
     L = [f"# Reproduce {m['id']}", "", f"> {sc.get('question', '')}", "",
-         f"This directory is one run: step `{sc.get('step')}` of scenario `{sc.get('name')}` (version "
-         f"{sc.get('version')}), defined in `{sc.get('doc')}` of the harness below. It ran from {m.get('started')} to "
+         f"This directory is one run: step `{sc.get('step')}` of scenario `{sc.get('name')}` ({version}). The "
+         f"scenario is defined in `{sc.get('doc')}` of the harness below; its versions are listed in that doc in "
+         f"newer harnesses. It ran from {m.get('started')} to "
          f"{m.get('ended')} and ended `{m.get('status')}`. `result.txt` holds its result, `records.jsonl` its "
          f"{o.get('records', 0)} reps ({o.get('valid', 0)} valid), and `manifest.json` every detail used here.", "",
          "Commands below refer to this directory as `$RUN`, and to the archive's objects relative to it. Set it "
          "first (this is where the run was archived; use its new place if the archive moved):", "",
          f"    RUN={run_dir}", "",
+         "The archive is `\"$RUN\"/../..`. The `runs` commands read it only when given `--archive \"$RUN\"/../..`; "
+         f"without it they read `$OFFBENCH_ARCHIVE` or `~/offbench-runs`. For example, {where}: "
+         f"`python3 -m offbench runs --archive \"$RUN\"/../.. show {m['id']}`.", "",
          "An object is a gzip file named by the sha256 of what it holds: `gzip -dc <object>` gives that file (or "
          "tar). `python3 -m offbench runs bundle` packs a run with its objects for another machine."]
     if m.get("status") == "imported":
         L += ["", "This run was recorded before the archive existed, so parts of what follows are unknown; the Gaps "
               "section lists them."]
-    sections = [("1. Hosts", _hosts(m)), ("2. Packages", _packages(m)),
+    sections = [("1. Hosts", _hosts(m, archive, run_dir)), ("2. Packages", _packages(m)),
                 ("3. The harness, where you run offbench", _harness(m, archive, run_dir)),
                 ("4. Host file, key and known hosts", _hosts_file(m)),
                 ("5. Code and binaries on the hosts", _binaries(m, archive, run_dir)),
-                ("6. Host tuning", _tuning(m)), ("7. Run", _run(m, run_dir)), ("8. Compare", _compare(m))]
+                ("6. Host tuning", _tuning(m)), ("7. Run", _run(m, run_dir, archive)), ("8. Compare", _compare(m))]
     for title, body in sections:
         L += ["", f"## {title}", "", *body]
     if m.get("warnings"):

@@ -898,7 +898,7 @@ def _repl_run(a: argparse.Namespace, repl, reg: dict, names: dict, cal: Optional
         log(f"calibration {cal['id']}: targets {cal['targets']['write_kcmd_s']:.0f}k writes/s, "
             f"{cal['targets']['read_kcmd_s']:.0f}k reads/s; " + ", ".join(
                 f"{b.name} {b.write_conns}xP{b.write_pipeline}/{b.p_conns}xP{b.p_pipeline}" for b in bins))
-    config = {"cores": sorted({c.cores for c in cells}), "acl": ints(a.acl),
+    config = {"cores": sorted({c.cores for c in cells}), "acl": ints(a.acl), "pinned": all(c.pin for c in cells),
               "replica_reader_conns": ints(a.conns), "replica_reader_pipelines": ints(a.pipelines),
               "reps": a.reps, "window_s": a.window, "max_rtt_ms": a.max_rtt_ms, "read_target": a.read_target,
               "reps_planned": len(repl.plan(cells, bins, a.reps)), "limit": a.limit,
@@ -971,7 +971,7 @@ def _repl_calibrate(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
     if isinstance(opened, int):
         return opened
     ssh, roles, rtt = opened
-    config = {"cores": [int(a.iot)], "write_pipeline": a.write_pipeline, "p_pipeline": a.p_pipeline,
+    config = {"cores": [int(a.iot)], "pinned": True, "write_pipeline": a.write_pipeline, "p_pipeline": a.p_pipeline,
               "targets": a.targets or "lowest builds' rates at the reference load", "ref_writers": a.ref_writers,
               "ref_p_conns": a.ref_p_conns, "ref_reps": a.ref_reps, "tol": a.tol, "max_probes": a.max_probes,
               "confirm_reps": a.confirm_reps, "window_s": a.window, "max_rtt_ms": a.max_rtt_ms,
@@ -1111,11 +1111,18 @@ def cmd_runs(a: argparse.Namespace) -> int:
                 bad += bool(problems)
             return 1 if bad else 0
         if a.rcmd == "import":
+            import shlex
+            if a.argv and not a.argv_source:
+                print("runs import: --argv needs --argv-source (where the command comes from)", file=sys.stderr)
+                return 2
             run = archive_mod.import_records(
                 store, Path(a.records), label=a.label, calibration=Path(a.calibration) if a.calibration else None,
                 log_file=Path(a.log) if a.log else None, harness_commit=a.harness_commit,
                 harness_repo=Path(a.harness_repo) if a.harness_repo else None, evidence=a.evidence,
-                notes=a.note, tags=a.tag, scenario_version=a.scenario_version)
+                notes=a.note, tags=a.tag, scenario_version=a.scenario_version,
+                host_facts=json.loads(Path(a.host_facts).read_text()) if a.host_facts else None,
+                argv=shlex.split(a.argv) if a.argv else None, argv_source=a.argv_source, cwd=a.cwd,
+                driver=Path(a.driver) if a.driver else None)
             print(f"imported {run.id}")
             for g in run.manifest.get("gaps") or []:
                 print(f"  gap: {g}")
@@ -1401,6 +1408,12 @@ def main(argv=None) -> int:
     ri.add_argument("--note", action="append", default=[]); ri.add_argument("--tag", action="append", default=[])
     ri.add_argument("--scenario-version", type=int, default=None,
                     help="the scenario method version the run used (see the scenario doc); unknown if omitted")
+    ri.add_argument("--host-facts", help='JSON {"source": "...", "hosts": {name: {instance_type, ami_id, ...}}, '
+                                         '"user_data_file": path}: facts found elsewhere, kept as declared')
+    ri.add_argument("--argv", help="the command the run used, as one shell-quoted string (from its driver)")
+    ri.add_argument("--argv-source", help="where --argv comes from")
+    ri.add_argument("--cwd", help="the directory the command ran in")
+    ri.add_argument("--driver", help="the script that ran the command, archived with the run")
     ru.set_defaults(fn=cmd_runs)
 
     a = p.parse_args(argv)

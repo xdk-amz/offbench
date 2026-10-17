@@ -188,10 +188,12 @@ def _fake_build(root: Path, commit: str) -> Path:
     return build / "src/valkey-server"
 
 
-def test_host_facts_describe_a_build_and_never_raise(tmp_path):
+def test_host_facts_describe_a_build_and_never_raise(tmp_path, monkeypatch):
     from offbench import hostfacts
+    monkeypatch.setattr(hostfacts, "imds", lambda timeout=1.0: {"instance_type": "test"})   # never this machine's
     server = _fake_build(tmp_path, "c" * 40)
     f = hostfacts.collect(servers=[str(server), str(tmp_path / "missing/valkey-server")], cli=str(server))
+    assert f["instance"] == {"instance_type": "test"}
     s, gone = f["servers"]
     assert s["sha256"] == _sha(server.read_bytes()) and s["version"].startswith("Valkey server v=9.0.0")
     b = s["build"]
@@ -478,7 +480,9 @@ def test_reproduce_md_names_hosts_tools_binaries_and_the_exact_command(tmp_path,
                  rel, f"~/offbench/builds/{COMMIT}/src/valkey-server", "~/base/src/valkey-cli",
                  "vendor/cachecannon/target/release/cachecannon", "OPT=-O3", "calibration.json",
                  "python3 -m offbench " + " ".join(argv[:1]), "--calibration data/repl/c2-calib.json",
-                 "--out data/repl/c2-repro.jsonl", "repl-capacity data/repl/c2-repro.jsonl"):
+                 "--out data/repl/c2-repro.jsonl", "repl-capacity data/repl/c2-repro.jsonl",
+                 f"runs --archive \"$RUN\"/../.. show {m['id']}", "in the shell where section 4's three exports are set",
+                 "This run had no host of its own for the replica readers"):
         assert want in doc, want
     assert "/keys/bench.pem" not in doc.split("The original command")[1].split("With this checkout")[1]
     snap = m["harness"]["snapshot"]["object"]
@@ -591,3 +595,52 @@ def test_capture_failures_are_gaps_and_the_run_goes_on(tmp_path, rig, monkeypatc
     m = json.loads((_run_dir(store_root, "repl-run") / "manifest.json").read_text())
     assert rc == 0 and m["status"] == "complete" and m["outputs"]["records"] == 2
     assert any(g.startswith("host facts and binaries not captured: ZeroDivisionError") for g in m["gaps"])
+
+
+def test_import_with_declared_facts_command_and_version_tells_the_operator_what_to_do(tmp_path):
+    store = archive.Archive(tmp_path / "arch")
+    root = _repo(tmp_path)                                  # a pre-archive harness: no offbench/archive.py
+    commit = _git(root, "rev-parse", "HEAD")
+    rec = {"kind": "replrw", "schema": 2, "ts": "2026-10-06T23:12:00Z", "rep": 1, "window_s": 6,
+           "bin": {"name": "stock", "commit": "d" * 40},
+           "cell": {"pipeline": 16, "conns": 50, "io_threads": 16, "pin": 1, "write_conns": 20, "write_pipeline": 8,
+                    "p_conns": 42, "p_pipeline": 1},
+           "hosts": {"primary": "metal-2", "replica": "metal-7", "gen": "metal-8", "rgen": "metal-4", "rgen2": "metal-5"},
+           "targets": {"write_kcmd_s": 1020.0, "read_kcmd_s": 294.0}, "calibration": {"id": "cal-x"}}
+    src = tmp_path / "c16.jsonl"
+    src.write_text(json.dumps(rec) + "\n" + json.dumps(dict(rec, rep=2, ts="2026-10-06T23:40:00Z")) + "\n")
+    driver = tmp_path / "rerun16.sh"
+    driver.write_text("python3 -m offbench repl-run ...\n")
+    ud = tmp_path / "userdata.sh"
+    ud.write_text("dnf -y install gcc\n")
+    decl = {"instance_type": "c8g.metal-24xl", "ami_id": "ami-0fa4996c14e7d501e", "az": "us-east-1b",
+            "ami_name": "al2023-ami-2023.12.20260909.0-kernel-6.1-arm64", "placement_group": None, "user": "ec2-user"}
+    facts = {"source": "aws ec2 describe-instances after the run",
+             "hosts": {h: dict(decl, user_data=str(ud) if h in ("metal-4", "metal-5") else None)
+                       for h in ("metal-2", "metal-7", "metal-8", "metal-4", "metal-5")}}
+    argv = ["repl-run", "--calibration", "/x/c16-calib.json", "--conns", "0,50", "--pipelines", "16", "--reps", "3",
+            "--out", "/x/c16.jsonl"]
+    run = archive.import_records(store, src, label="c16", harness_commit=commit, harness_repo=root,
+                                 evidence="rerun16.out", scenario_version=1, host_facts=facts, argv=argv,
+                                 argv_source="rerun16.sh, the driver that ran it", cwd="/x/offbench-matrix",
+                                 driver=driver)
+    m = store.manifest(run.dir)
+    assert m["seconds"] == 1680 and m["scenario"]["method"].startswith("every build's writers")
+    assert m["scenario"]["version_given_at_import"] and m["command"]["argv"] == argv
+    assert m["rig"]["roles"]["rgen2"]["declared"]["instance_type"] == "c8g.metal-24xl"
+    assert m["harness"]["has"]["offbench/archive.py"] is False and m["config"]["pinned"] is True
+    assert {w for _, w in archive.objects_of(m)} >= {"driver script", "host user data", "harness snapshot"}
+    doc = (run.dir / "REPRODUCE.md").read_text()
+    for want in ("version 1, assigned when it was imported: every build's writers",
+                 "from a newer offbench checkout (this run's harness predates the archive",
+                 "they come from aws ec2 describe-instances after the run", "c8g.metal-24xl", "ami-0fa4996c14e7d501e",
+                 "al2023-ami-2023.12.20260909.0-kernel-6.1-arm64", "placement group originally none",
+                 "split evenly across 2 hosts", "Log in as `ec2-user`", "- User data of rgen, rgen2: `gzip -dc",
+                 "primary, replica, gen had no user data; how they were set up was not recorded",
+                 "of a newer offbench checkout (this run's harness predates it)",
+                 "its release fixes the package repository", "this one is from rerun16.sh, the driver that ran it",
+                 "The driver script is archived", "--calibration data/repl/c16-calib.json",
+                 "Every rep of this run was pinned", "the new run is not archived"):
+        assert want in doc, want
+    assert archive.verify(store, run.dir) == []
+    assert "Log in as `?`" not in doc and "originally ?" not in doc

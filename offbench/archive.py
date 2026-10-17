@@ -51,13 +51,20 @@ PACKAGE = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE.parent
 SERVER_ROLES = ("primary", "replica")
 
-# Scenarios the archive knows. Bump a version when its method changes; the scenario doc keeps the history.
+# Scenarios the archive knows. Bump a version when its method changes, and say what it means here and in the doc.
 SCENARIOS = {
     "replica-read-capacity": {
         "version": 1,
         "doc": "docs/replica-read-capacity.md",
         "question": ("At X writes/s and Y reads/s on the primary, how many reads/s can the replica serve before "
                      "it falls out of sync?"),
+        "versions": {
+            0: "calibrated runs where each build's calibration chose its own pipeline depths and the reference "
+               "ran at P16",
+            1: "every build's writers and primary readers at one pipeline depth per role in the reference and "
+               "every probe; reps whose primary drifts more than 7% off X or Y are invalid; replica readers on "
+               "one or more hosts",
+        },
     },
 }
 STEPS = {"repl-calibrate": "calibrate", "repl-run": "sweep"}
@@ -69,13 +76,21 @@ SECRET_LIKE = ("*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ecdsa*", "id_e
 TREE_JUNK = ("__pycache__", "*.pyc", ".pytest_cache", ".git", "data", "dash/data", "dash/replica/data",
              "vendor/cachecannon/target")
 BIN_KEYS = ("sha256", "bytes", "version", "build_id", "toolchain", "text_bytes", "libs")
+# Harness files REPRODUCE.md points at; a snapshot records which it has, since older harnesses lack some.
+HARNESS_FILES = ("offbench/archive.py", "scripts/host-userdata.sh", "scripts/pintune.sh")
 
 ARCHIVE_MD = """# offbench run archive
 
 One directory per benchmark invocation under runs/, content-addressed blobs under objects/.
-Start with `python3 -m offbench runs list` and `python3 -m offbench runs show <run id>`; each run's
-REPRODUCE.md says how to run it again on new hosts. Files in a sealed run are read-only: never edit them.
-A correction is a new run; link it with `python3 -m offbench runs note <new> --supersedes <old> --text ...`.
+
+Read it from an offbench checkout (any run's harness snapshot is one; its REPRODUCE.md says how to unpack it),
+naming this directory, since without --archive the commands read $OFFBENCH_ARCHIVE or ~/offbench-runs:
+
+    python3 -m offbench runs --archive <this directory> list
+    python3 -m offbench runs --archive <this directory> show <run id>
+
+Each run's REPRODUCE.md says how to run it again on new hosts. Files in a sealed run are read-only: never edit
+them. A correction is a new run; link it with `runs note <new> --supersedes <old> --text ...`.
 This directory holds host names, addresses and instance ids: do not publish it as it is.
 """
 
@@ -147,8 +162,9 @@ class Archive:
     def ensure(self) -> "Archive":
         for d in (self.runs_dir, self.objects_dir, self.index_dir, self.notes_dir):
             d.mkdir(parents=True, exist_ok=True)
-        if not (self.root / "ARCHIVE.md").exists():
-            write_atomic(self.root / "ARCHIVE.md", ARCHIVE_MD)
+        readme = self.root / "ARCHIVE.md"
+        if not readme.exists() or readme.read_text() != ARCHIVE_MD:
+            write_atomic(readme, ARCHIVE_MD)
         return self
 
     # ---- objects ----------------------------------------------------------
@@ -343,6 +359,7 @@ def harness(root: Path, archive: Archive) -> dict:
                         "left_out_secret_like": skipped}
     info["code"] = {n: h for n, h in hashes.items() if n.startswith("offbench/") and n.endswith(".py")}
     info["docs"] = {n: h for n, h in hashes.items() if n.endswith(".md") and not n.startswith("vendor/")}
+    info["has"] = {p: p in hashes for p in HARNESS_FILES}
     info["cachecannon_source"] = vendored_cachecannon(hashes, root)
     return info
 
@@ -383,6 +400,7 @@ def harness_from_commit(repo: Path, commit: str, archive: Archive) -> dict:
                              "left_out_secret_like": skipped},
                 "code": {n: h for n, h in hashes.items() if n.startswith("offbench/") and n.endswith(".py")},
                 "docs": {n: h for n, h in hashes.items() if n.endswith(".md") and not n.startswith("vendor/")},
+                "has": {p: p in hashes for p in HARNESS_FILES},
                 "cachecannon_source": vendored_cachecannon(hashes, tree)}
 
 
@@ -421,8 +439,14 @@ def constants() -> dict:
             "replcap": pick(replcap, ("CAL_TOL", "AIM", "CONFIRM_ROUNDS", "MIN_CONNS", "APART", "K_SLOPE", "FLAT"))}
 
 
-def scenario_for(command: str, calibrated: bool) -> dict:
-    s = dict(SCENARIOS["replica-read-capacity"], name="replica-read-capacity")
+def scenario_for(command: str, calibrated: bool, version: Optional[int] = None) -> dict:
+    """The scenario record of a run: name, question, defining doc, step, and the method version with what it means
+    (the current version unless given)."""
+    base = SCENARIOS["replica-read-capacity"]
+    s = {k: v for k, v in base.items() if k != "versions"}
+    s["name"] = "replica-read-capacity"
+    s["version"] = base["version"] if version is None else version
+    s["method"] = base["versions"].get(s["version"])
     s["step"] = STEPS[command] if (command != "repl-run" or calibrated) else "run without a calibration"
     return s
 
@@ -731,6 +755,16 @@ def objects_of(m: dict) -> list:
         out.append((h["snapshot"]["object"], "harness snapshot"))
     if h.get("diff_object"):
         out.append((h["diff_object"], "harness uncommitted diff"))
+    drv = (m.get("command") or {}).get("driver") or {}
+    if drv.get("object"):
+        out.append((drv["object"], "driver script"))
+    ud = (m.get("rig") or {}).get("user_data") or {}
+    if ud.get("object"):
+        out.append((ud["object"], "host user data"))
+    for role, r in ((m.get("rig") or {}).get("roles") or {}).items():
+        ud = ((r.get("declared") or {}).get("user_data")) or {}
+        if isinstance(ud, dict) and ud.get("object") and (ud["object"], "host user data") not in out:
+            out.append((ud["object"], "host user data"))
     for b in m.get("builds") or []:
         for g in b.get("binaries") or []:
             if g.get("archived"):
@@ -804,6 +838,11 @@ def list_line(m: dict) -> str:
 def _role_line(role: str, r: dict) -> str:
     f = r.get("facts") or {}
     if not f:
+        d = r.get("declared") or {}
+        if d:
+            return (f"  {role:<8} {r.get('host')}: declared {d.get('instance_type') or '?'} {d.get('instance_id') or ''} "
+                    f"{d.get('az') or '?'} pg {d.get('placement_group') or '-'}; {d.get('ami_id') or '?'} "
+                    f"{d.get('ami_name') or ''}; user {d.get('user') or '?'}")
         return f"  {role:<8} {r.get('host')}: not recorded"
     i, o = f.get("instance") or {}, f.get("os") or {}
     pt = f.get("pintune") or {}
@@ -834,10 +873,18 @@ def show(m: dict, notes: list = (), run_dir: Optional[Path] = None) -> str:
          + (f"  ({m['seconds'] // 60} min)" if m.get("seconds") else "")]
     L.append(f"scenario  {sc.get('name')} " + (f"v{sc['version']}" if sc.get("version") is not None else "version unknown")
              + f", step {sc.get('step')}: {sc.get('question')}")
+    if sc.get("method"):
+        L.append(f"          method v{sc['version']}: {sc['method']}"
+                 + (" (version given at import)" if sc.get("version_given_at_import") else ""))
     L.append(f"          defined in {sc.get('doc')} (sha256 {_short(sc.get('doc_sha256'))}) of the harness snapshot")
     if cmd.get("argv") is not None:
         L.append(f"command   python3 -m offbench {shlex.join(cmd['argv'])}")
-        L.append(f"          cwd {cmd.get('cwd')}")
+        if cmd.get("cwd"):
+            L.append(f"          cwd {cmd['cwd']}")
+        if cmd.get("source"):
+            L.append(f"          from {cmd['source']} (not recorded by the run)")
+        if (cmd.get("driver") or {}).get("object"):
+            L.append(f"          driver {cmd['driver']['path']}, archived as object {_short(cmd['driver']['object'], 16)}")
     if h:
         state = "dirty" if h.get("dirty") else "clean" if h.get("dirty") is False else "state unknown"
         snap = h.get("snapshot") or {}
@@ -888,6 +935,8 @@ def show(m: dict, notes: list = (), run_dir: Optional[Path] = None) -> str:
     if rig:
         L.append("hosts")
         L += [_role_line(role, r) for role, r in (rig.get("roles") or {}).items()]
+        if rig.get("declared_source"):
+            L.append(f"  declared: {rig['declared_source']}")
         rtt = rig.get("rtt_ms") or {}
         if rtt:
             L.append("  rtt median ms: " + ", ".join(f"{k} {(v or {}).get('median_ms', float('nan')):.3f}"
@@ -922,10 +971,16 @@ def import_records(archive: Archive, records: Path, *, label: Optional[str] = No
                    calibration: Optional[Path] = None, log_file: Optional[Path] = None,
                    harness_commit: Optional[str] = None, harness_repo: Optional[Path] = None,
                    evidence: Optional[str] = None, notes: list = (), tags=(),
-                   scenario_version: Optional[int] = None) -> Run:
+                   scenario_version: Optional[int] = None, host_facts: Optional[dict] = None,
+                   argv: Optional[list] = None, argv_source: Optional[str] = None, cwd: Optional[str] = None,
+                   driver: Optional[Path] = None) -> Run:
     """Archive a run recorded before the archive existed, from its records file (and calibration and log). What
     the records do not say (binaries, host facts, tool versions) is listed under gaps, not guessed; so is the
-    scenario version, unless the importer gives it."""
+    scenario version, unless the importer gives it.
+
+    host_facts: {"source": how they were found, "hosts": {host name: facts}}, kept per role under `declared`,
+    apart from observed facts. argv: the command as the importer found it (argv_source says where); driver: the
+    script that ran it, archived as an object."""
     from . import repl, replcap
     archive.ensure()
     records = Path(records)
@@ -950,17 +1005,22 @@ def import_records(archive: Archive, records: Path, *, label: Optional[str] = No
     m = run.manifest = {
         "kind": "offbench-run", "schema": SCHEMA, "id": rid, "label": label, "status": "imported",
         "started": times[0], "ended": times[-1], "tags": sorted(set(tags) | {"imported"}),
-        "scenario": scenario_for(command, calibrated),
-        "command": {"name": command, "argv": None, "args": None},
+        "scenario": scenario_for(command, calibrated, scenario_version),
+        "command": {"name": command, "argv": list(argv) if argv else None, "args": None, "cwd": cwd,
+                    "source": argv_source if argv else None},
         "imported": {"at": iso(), "by": getpass.getuser(), "records": str(records.resolve()),
                      "records_sha256": hashlib.sha256(raw).hexdigest(), "notes": list(notes)},
         "inputs": {}, "gaps": [], "warnings": [],
     }
     run._started = time.time()
-    run.gap("recorded before the archive: the command line, host facts, binary hashes and tool versions were not "
-            "captured at the time")
-    m["scenario"]["version"] = scenario_version
+    if driver and Path(driver).exists():
+        m["command"]["driver"] = {"path": str(Path(driver).resolve()), "object": archive.put_file(driver),
+                                  "note": "the script's content when the run was imported"}
+    missing = "host facts, binary hashes and tool versions" + ("" if argv else ", and the command line,")
+    run.gap(f"recorded before the archive: {missing} were not captured at the time")
+    m["scenario"]["version_given_at_import"] = scenario_version is not None
     if scenario_version is None:
+        m["scenario"]["version"], m["scenario"]["method"] = None, None
         run.gap("scenario version not given at import: which method ran is in the harness commit and the notes")
     h = None
     if harness_commit and harness_repo:
@@ -975,8 +1035,23 @@ def import_records(archive: Archive, records: Path, *, label: Optional[str] = No
     else:
         run.gap("harness commit unknown")
     first_rec = recs[0]
+    declared = json.loads(json.dumps((host_facts or {}).get("hosts") or {}))    # a copy: user_data paths become objects
     m["rig"] = {"rtt_ms": first_rec.get("rtt_ms"),
-                "roles": {role: {"host": name, "facts": None} for role, name in (first_rec.get("hosts") or {}).items()}}
+                "roles": {role: {"host": name, "facts": None, **({"declared": declared[name]} if name in declared else {})}
+                          for role, name in (first_rec.get("hosts") or {}).items()}}
+    ud_objects: dict = {}
+    for name, d in declared.items():
+        ud = d.get("user_data")
+        if isinstance(ud, str):
+            if ud not in ud_objects:
+                ud_objects[ud] = archive.put_file(ud) if Path(ud).exists() else None
+            d["user_data"] = ({"path": str(Path(ud).resolve()), "object": ud_objects[ud]} if ud_objects[ud]
+                              else {"path": ud, "object": None})
+    if declared:
+        m["rig"]["declared_source"] = host_facts.get("source")
+        unknown = [r for r, v in m["rig"]["roles"].items() if "declared" not in v]
+        if unknown:
+            run.gap(f"no declared facts for {', '.join(unknown)}")
     seen: dict = {}
     for r in recs:
         b = r.get("bin") or {}
@@ -988,7 +1063,8 @@ def import_records(archive: Archive, records: Path, *, label: Optional[str] = No
                   "valkey-cli": {"source": "any valkey build; only the control connection uses it", "binaries": []}}
     cells = [r["cell"] for r in recs if r.get("cell")]
     m["config"] = {"cores": sorted({c["io_threads"] - (c.get("pin_share") or 0) for c in cells}),
-                   "reps": max((r.get("rep") or 0) for r in recs), "window_s": first_rec.get("window_s")}
+                   "reps": max((r.get("rep") or 0) for r in recs), "window_s": first_rec.get("window_s"),
+                   "pinned": all(c.get("pin") for c in cells) if cells else None}
     cal = None
     if calibration and Path(calibration).exists():
         cal = json.loads(Path(calibration).read_text())

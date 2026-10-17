@@ -15,6 +15,9 @@ python3 -m offbench runs show <run id, unique prefix or label> [--json]
 python3 -m offbench runs reproduce <run>     # its REPRODUCE.md
 ```
 
+These read `--archive`, else `OFFBENCH_ARCHIVE`, else `~/offbench-runs`. For an unpacked bundle or a moved archive,
+pass `runs --archive <its directory> ...`.
+
 `runs show` answers, from the manifest:
 
 | question | where it comes from |
