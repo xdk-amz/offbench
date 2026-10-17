@@ -513,6 +513,14 @@ def test_rewrite_argv_swaps_machine_paths_for_checkout_paths():
         "repl-calibrate", "--out", "data/repl/c-repro.jsonl"]
 
 
+def test_calibrate_targets_advice_only_when_the_command_lacks_them(tmp_path):
+    m = {"command": {"name": "repl-calibrate", "argv": ["repl-calibrate", "--out", "/c.jsonl"]}, "label": "c",
+         "outputs": {"targets": {"write_kcmd_s": 861.2020868141763, "read_kcmd_s": 538.25}}}
+    assert "add `--targets 861.2020868141763,538.25`" in "\n".join(reproduce._run(m, tmp_path))
+    m["command"]["argv"] += ["--targets", "861.2,538.2"]
+    assert "To search again" not in "\n".join(reproduce._run(m, tmp_path))
+
+
 def test_runs_cli_lists_shows_verifies_bundles_and_notes(tmp_path, rig, capsys):
     store_root = tmp_path / "arch"
     _, cal_path, _ = _calibrate(tmp_path, store_root)
@@ -663,7 +671,8 @@ def test_import_with_declared_facts_command_and_version_tells_the_operator_what_
                  "the highest median replica read rate",
                  "its release fixes the package repository", "this one is from rerun16.sh, the driver that ran it",
                  "The driver script is archived", "--calibration data/repl/c16-calib.json",
-                 "Every rep of this run was pinned", "the new run is not archived"):
+                 "Every rep of this run was pinned", "the new run is not archived",
+                 "Its records span 28 min, first rep to last"):
         assert want in doc, want
     assert "known_hosts.example" not in doc and "newer harnesses" not in doc
     assert "archived_by.snapshot.object" in archive.ARCHIVE_MD

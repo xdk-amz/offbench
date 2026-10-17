@@ -373,13 +373,17 @@ def _run(m: dict, run_dir: Path, archive=None) -> list:
               + "; the scenario doc's examples may use others.", ""]
     if m.get("seconds") is not None:
         s = m["seconds"]
-        L.append(f"It took {s // 60} min." if s >= 60 else f"It took {s} s.")
+        span = f"{s // 60} min" if s >= 60 else f"{s} s"
+        L.append(f"Its records span {span}, first rep to last; the run took longer by its setup and first rep."
+                 if m.get("status") == "imported" else f"It took {span}.")
     if name == "repl-calibrate":
         t = (m.get("outputs") or {}).get("targets") or {}
-        L.append("The calibration chooses each build's load from what it measures, so a rerun can land on slightly "
-                 "different connection counts. To measure at exactly this run's loads, run the sweep with this run's "
-                 "`calibration.json`." + (f" To search again against the same targets, add `--targets "
-                                          f"{t['write_kcmd_s']:.0f},{t['read_kcmd_s']:.0f}`." if t.get("write_kcmd_s") else ""))
+        given = any(a == "--targets" or a.startswith("--targets=") for a in cmd["argv"])
+        L += ["", "The calibration chooses each build's load from what it measures, so a rerun can land on slightly "
+                  "different connection counts. To measure at exactly this run's loads, run the sweep with this run's "
+                  "`calibration.json`."
+              + (f" To search again against the same targets, add `--targets {t['write_kcmd_s']!r},{t['read_kcmd_s']!r}`."
+                 if t.get("write_kcmd_s") and not given else "")]
     return L
 
 
