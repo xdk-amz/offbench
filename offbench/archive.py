@@ -151,6 +151,35 @@ def strip_credentials(url: Optional[str]) -> Optional[str]:
     return re.sub(r"//[^@/]*@", "//", url) if url else url
 
 
+def ec2_describe(ids: list, region: str, profile: Optional[str] = None) -> dict:
+    """instance id -> {instance_type, ami_id, ami_name, az, placement_group, launched, arch}, from read-only
+    `aws ec2 describe-instances` and `describe-images` on the orchestrator. Raises ArchiveError on failure."""
+    tail = ["--region", region, "--output", "json"] + (["--profile", profile] if profile else [])
+
+    def aws(*args: str) -> dict:
+        try:
+            r = subprocess.run(["aws", "ec2", *args, *tail], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise ArchiveError(f"aws ec2 {args[0]}: {e}")
+        if r.returncode:
+            raise ArchiveError(f"aws ec2 {args[0]}: {(r.stderr or r.stdout).strip()[-200:]}")
+        return json.loads(r.stdout or "{}")
+    found = {}
+    for res in aws("describe-instances", "--instance-ids", *ids).get("Reservations") or []:
+        for i in res.get("Instances") or []:
+            p = i.get("Placement") or {}
+            found[i["InstanceId"]] = {"instance_id": i["InstanceId"], "instance_type": i.get("InstanceType"),
+                                      "ami_id": i.get("ImageId"), "az": p.get("AvailabilityZone"),
+                                      "placement_group": p.get("GroupName") or None, "launched": i.get("LaunchTime"),
+                                      "arch": i.get("Architecture")}
+    amis = sorted({v["ami_id"] for v in found.values() if v.get("ami_id")})
+    if amis:
+        names = {im["ImageId"]: im.get("Name") for im in aws("describe-images", "--image-ids", *amis).get("Images") or []}
+        for v in found.values():
+            v["ami_name"] = names.get(v.get("ami_id"))
+    return found
+
+
 class Archive:
     def __init__(self, root):
         self.root = Path(root)
@@ -542,9 +571,10 @@ class Run:
 
     # ---- hosts, builds and tools --------------------------------------------
     def capture(self, ssh, roles: dict, bins: list, rtt: dict, log: Callable[[str], None] = print,
-                fetch: bool = True) -> None:
+                fetch: bool = True, ec2: Optional[dict] = None) -> None:
         """Ask every host what it is and what it will run, then archive any binary and build tree not yet in the
-        store. Failures become gaps; the benchmark goes on."""
+        store. ec2: role -> {instance_id, region} from the host registry, for the AMI, zone and placement group,
+        which a host does not know locally. Failures become gaps; the benchmark goes on."""
         t0 = time.time()
         m = self.manifest
         servers = sorted({b.server for b in bins})
@@ -569,6 +599,7 @@ class Run:
                                        "private_ip": h.ip, "facts": f or None}
             if f and role in SERVER_ROLES and not (f.get("pintune") or {}).get("applied"):
                 self.warn(f"{h.name} ({role}): pintune state not found at start")
+        self._ec2(roles, ec2 or {})
         srv_roles = [r for r in roles if r in SERVER_ROLES]
         m["builds"] = []
         for b in bins:
@@ -613,6 +644,33 @@ class Run:
         self.save()
         log(f"archive: facts from {len(facts)}/{len(roles)} hosts, {len(self._sources)} binaries "
             f"({sum(self.archive.has(s) for s in self._sources)} in the store) in {time.time() - t0:.0f} s")
+
+    def _ec2(self, roles: dict, ec2: dict) -> None:
+        if not ec2:
+            self.gap("the host registry has no EC2 instance ids: the hosts' AMI, zone and placement group were not "
+                     "recorded")
+            return
+        by_region: dict = {}
+        for e in ec2.values():
+            by_region.setdefault(e["region"], set()).add(e["instance_id"])
+        found: dict = {}
+        try:
+            for region, ids in by_region.items():
+                found.update(ec2_describe(sorted(ids), region, os.environ.get("OFFBENCH_AWS_PROFILE")))
+        except Exception as e:
+            self.gap(f"EC2 describe failed ({e}): the hosts' AMI, zone and placement group were not recorded; set "
+                     "OFFBENCH_AWS_PROFILE to a profile that can describe them")
+            return
+        for role, e in ec2.items():
+            got = found.get(e["instance_id"])
+            entry = self.manifest["rig"]["roles"].get(role)
+            if got is None or entry is None:
+                self.gap(f"{roles[role].name} ({role}): EC2 instance {e['instance_id']} not found")
+                continue
+            entry["ec2"] = got
+            seen = ((entry.get("facts") or {}).get("instance") or {}).get("instance_id")
+            if seen and seen != e["instance_id"]:
+                self.warn(f"{roles[role].name} ({role}): the host says it is {seen}, the registry {e['instance_id']}")
 
     def _fetch(self, ssh, roles: dict, log: Callable[[str], None]) -> None:
         want: dict = {}      # role -> [(pack item, what it is, callback(result))]
@@ -844,7 +902,8 @@ def _role_line(role: str, r: dict) -> str:
                     f"{d.get('az') or '?'} pg {d.get('placement_group') or '-'}; {d.get('ami_id') or '?'} "
                     f"{d.get('ami_name') or ''}; user {d.get('user') or '?'}")
         return f"  {role:<8} {r.get('host')}: not recorded"
-    i, o = f.get("instance") or {}, f.get("os") or {}
+    i = {**(r.get("ec2") or {}), **{k: v for k, v in (f.get("instance") or {}).items() if v}}
+    o = f.get("os") or {}
     pt = f.get("pintune") or {}
     clock = (f.get("clock") or {}).get("System time", "?")
     return (f"  {role:<8} {r.get('host')}: {i.get('instance_type') or '?'} {i.get('instance_id') or ''} "

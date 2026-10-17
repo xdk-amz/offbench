@@ -781,12 +781,23 @@ def _archive_begin(a: argparse.Namespace, command: str, calibrated: bool, config
     return run
 
 
-def _archive_capture(run, ssh, roles: dict, bins: list, rtt: dict, a: argparse.Namespace, log) -> None:
+def _ec2_ids(reg: dict, names: dict) -> dict:
+    """role -> {instance_id, region} for the hosts the registry gives an EC2 instance id and zone."""
+    out = {}
+    for role, name in names.items():
+        h = reg.get(name)
+        if h is not None and getattr(h, "instance_id", "") and getattr(h, "az", ""):
+            out[role] = {"instance_id": h.instance_id, "region": h.az[:-1]}
+    return out
+
+
+def _archive_capture(run, ssh, roles: dict, bins: list, rtt: dict, a: argparse.Namespace, log,
+                     ec2: Optional[dict] = None) -> None:
     """Host facts, binaries and sources into the archive run. A failure here is recorded and the run goes on."""
     if run is None:
         return
     try:
-        run.capture(ssh, roles, bins, rtt, log=log, fetch=not a.no_archive_binaries)
+        run.capture(ssh, roles, bins, rtt, log=log, fetch=not a.no_archive_binaries, ec2=ec2)
     except Exception as e:
         run.gap(f"host facts and binaries not captured: {type(e).__name__}: {e}")
         log(f"archive: capture failed ({type(e).__name__}: {e}); the run goes on without it")
@@ -914,7 +925,7 @@ def _repl_run(a: argparse.Namespace, repl, reg: dict, names: dict, cal: Optional
             run.put_input_calibration(Path(a.calibration), cal)
     status, rc, err = "aborted", None, None
     try:
-        _archive_capture(run, ssh, roles, bins, rtt, a, log)
+        _archive_capture(run, ssh, roles, bins, rtt, a, log, ec2=_ec2_ids(reg, names))
         rc = repl.run_matrix(ssh, roles, cells, bins, a.reps, Path(a.out), window_s=a.window, log=log, meta=meta,
                              tee=run.records if run else None, launch_dir=run.launch_dir if run else None)
         status = "complete" if rc == 0 else "failed"
@@ -980,7 +991,7 @@ def _repl_calibrate(a: argparse.Namespace, repl, reg: dict, names: dict) -> int:
     run = _archive_begin(a, "repl-calibrate", True, config, log)
     status, rc, err, doc = "aborted", None, None, None
     try:
-        _archive_capture(run, ssh, roles, bins, rtt, a, log)
+        _archive_capture(run, ssh, roles, bins, rtt, a, log, ec2=_ec2_ids(reg, names))
         rc, doc = _calibrate(a, repl, names, bins, out, ssh, roles, rtt, log, run)
         status = "complete" if rc == 0 else "failed"
         return rc

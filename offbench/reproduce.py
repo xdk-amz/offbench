@@ -67,10 +67,14 @@ def _hosts(m: dict, archive, run_dir: Path) -> list:
     if not roles:
         return ["The hosts were not recorded."]
 
-    def fact(r: dict, observed, declared_key: str):
+    def fact(r: dict, observed, key: str):
+        """Observed on the host, else from the EC2 API at run time, else declared at import."""
         f = r.get("facts") or {}
         v = observed(f) if f else None
-        return v if v not in (None, "") else (r.get("declared") or {}).get(declared_key)
+        for src in ("ec2", "declared"):
+            if v in (None, ""):
+                v = (r.get(src) or {}).get(key)
+        return v
     inst = lambda k: (lambda f: (f.get("instance") or {}).get(k))
     rows = []
     for role, r in roles.items():

@@ -16,7 +16,6 @@ import shutil
 import socket
 import subprocess
 import time
-import urllib.request
 from collections import Counter
 from pathlib import Path
 from typing import Optional
@@ -40,11 +39,7 @@ TOOLS = {"gcc": ["--version"], "make": ["--version"], "git": ["--version"], "rea
 LSCPU_KEYS = ("Architecture", "Vendor ID", "Model name", "Model", "Stepping", "CPU(s)", "Thread(s) per core",
               "Core(s) per socket", "Socket(s)", "NUMA node(s)", "L1d cache", "L1i cache", "L2 cache", "L3 cache",
               "BogoMIPS")
-IMDS = "http://169.254.169.254/latest"
-IMDS_FIELDS = (("instance_id", "instance-id"), ("instance_type", "instance-type"), ("ami_id", "ami-id"),
-               ("az", "placement/availability-zone"), ("az_id", "placement/availability-zone-id"),
-               ("region", "placement/region"), ("placement_group", "placement/group-name"),
-               ("private_ip", "local-ipv4"))
+DMI = Path("/sys/devices/virtual/dmi/id")
 
 
 def iso(t: Optional[float] = None) -> str:
@@ -71,22 +66,16 @@ def read(path, limit: int = 65536) -> Optional[str]:
         return None
 
 
-def imds(timeout: float = 1.0) -> dict:
-    """EC2 instance metadata (IMDSv2), or {} off EC2."""
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        req = urllib.request.Request(f"{IMDS}/api/token", method="PUT",
-                                     headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"})
-        token = opener.open(req, timeout=timeout).read().decode()
-    except Exception:
-        return {}
-    out = {}
-    for key, path in IMDS_FIELDS:
-        try:
-            req = urllib.request.Request(f"{IMDS}/meta-data/{path}", headers={"X-aws-ec2-metadata-token": token})
-            out[key] = opener.open(req, timeout=timeout).read().decode().strip()
-        except Exception:
-            out[key] = None
+def dmi() -> dict:
+    """What the firmware says the machine is, from local sysfs (no network). On EC2 the product name is the
+    instance type and the board asset tag the instance id; the AMI, zone and placement group are not here (the
+    orchestrator asks the EC2 API for those)."""
+    out = {"vendor": read(DMI / "sys_vendor"), "product": read(DMI / "product_name"),
+           "asset_tag": read(DMI / "board_asset_tag"), "bios": read(DMI / "bios_version")}
+    if "amazon" in (out["vendor"] or "").lower():
+        out["instance_type"] = out["product"]
+        if (out["asset_tag"] or "").startswith("i-"):
+            out["instance_id"] = out["asset_tag"]
     return out
 
 
@@ -258,7 +247,7 @@ def collect(servers: list = (), cachecannon: Optional[str] = None, cli: Optional
     out = {
         "collected": iso(t0),
         "host": {"hostname": socket.gethostname(), "user": getpass.getuser(), "home": str(Path.home())},
-        "instance": imds(), "os": os_release(), "kernel": platform.release(), "arch": platform.machine(),
+        "instance": dmi(), "os": os_release(), "kernel": platform.release(), "arch": platform.machine(),
         "cmdline": read("/proc/cmdline"), "cpu": cpu(), "mem_kb": mem_kb(), "python": platform.python_version(),
         "packages": packages(), "tools": tools(), "sysctl": sysctls(), "thp": thp(), "pintune": pintune_state(),
         "nics": nics(), "clock": clock(), "limits": {"nofile": list(resource.getrlimit(resource.RLIMIT_NOFILE))},

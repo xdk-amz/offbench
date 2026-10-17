@@ -190,10 +190,11 @@ def _fake_build(root: Path, commit: str) -> Path:
 
 def test_host_facts_describe_a_build_and_never_raise(tmp_path, monkeypatch):
     from offbench import hostfacts
-    monkeypatch.setattr(hostfacts, "imds", lambda timeout=1.0: {"instance_type": "test"})   # never this machine's
+    monkeypatch.setattr(hostfacts, "dmi", lambda: {"instance_type": "test"})
     server = _fake_build(tmp_path, "c" * 40)
     f = hostfacts.collect(servers=[str(server), str(tmp_path / "missing/valkey-server")], cli=str(server))
     assert f["instance"] == {"instance_type": "test"}
+    assert "169.254" not in Path(hostfacts.__file__).read_text()      # nothing here reads instance metadata
     s, gone = f["servers"]
     assert s["sha256"] == _sha(server.read_bytes()) and s["version"].startswith("Valkey server v=9.0.0")
     b = s["build"]
@@ -227,8 +228,7 @@ def test_agent_packs_files_and_build_trees_and_hashes_binaries(tmp_path, monkeyp
 COMMIT = "1" * 40
 FACTS = {
     "host": {"hostname": "ip-10-0-0-1", "user": "ec2-user", "home": "/home/ec2-user"},
-    "instance": {"instance_id": "i-1234567890abcdef0", "instance_type": "c8g.metal-24xl", "ami_id": "ami-0abc",
-                 "az": "us-east-1b", "placement_group": "bench-pg", "region": "us-east-1"},
+    "instance": {"vendor": "Amazon EC2", "product": "c8g.metal-24xl", "instance_type": "c8g.metal-24xl"},
     "os": {"pretty": "Amazon Linux 2023.6.20241010", "release": "Amazon Linux release 2023.6.20241010 (Amazon Linux)"},
     "kernel": "6.1.112-122.189.amzn2023.aarch64", "arch": "aarch64",
     "cpu": {"count": 96, "Model name": "Neoverse-V2"}, "mem_kb": 197_000_000, "python": "3.9.20",
@@ -333,9 +333,19 @@ HOSTS = ["--primary", "P", "--replica", "R", "--gen", "G", "--key", "/keys/bench
 def rig(tmp_path, monkeypatch):
     import contextlib
     import types
+    from offbench import hosts as hosts_mod
     from offbench import lease
     r = _Rig(tmp_path, monkeypatch)
-    reg = types.SimpleNamespace(hosts={}, path=tmp_path / "registry.json")
+    ids = {"P": "i-1234567890abcdef0", "R": "i-1234567890abcdef1", "G": "i-1234567890abcdef2"}
+    reg = types.SimpleNamespace(hosts={n: hosts_mod.Host(n, f"ec2-user@192.0.2.{k}", instance_id=i, az="us-east-1b")
+                                       for k, (n, i) in enumerate(ids.items(), 1)}, path=tmp_path / "registry.json")
+    r.ec2_calls = []
+
+    def describe(want, region, profile=None):
+        r.ec2_calls.append((tuple(want), region))
+        return {i: {"instance_id": i, "instance_type": "c8g.metal-24xl", "ami_id": "ami-0abc", "ami_name": "al2023-test",
+                    "az": "us-east-1b", "placement_group": "bench-pg", "arch": "arm64"} for i in want}
+    monkeypatch.setattr(archive, "ec2_describe", describe)
     monkeypatch.setattr(lease, "held", lambda *a, **k: contextlib.nullcontext())
     monkeypatch.setattr(cli, "_repl_hosts", lambda a, cal=None: ({"primary": "P", "replica": "R", "gen": "G"}, reg))
     monkeypatch.setattr(cli, "_repl_open", lambda a, repl_, reg_, names, bins, log: (r, ROLES, RTT))
@@ -394,6 +404,8 @@ def test_calibrate_and_sweep_archive_what_ran_and_how(tmp_path, rig):
     assert cc["upstream_commit"].startswith("341254afe") and cc["binaries"][0]["roles"] == ["gen"]
     assert cc["binaries"][0]["archived"] and vcli["binaries"][0]["roles"] == ["primary", "replica"]
     assert m["rig"]["roles"]["primary"]["facts"]["instance"]["instance_type"] == "c8g.metal-24xl"
+    assert m["rig"]["roles"]["replica"]["ec2"]["ami_id"] == "ami-0abc" and m["rig"]["roles"]["gen"]["ec2"]["az"]
+    assert rig.ec2_calls[-1] == (("i-1234567890abcdef0", "i-1234567890abcdef1", "i-1234567890abcdef2"), "us-east-1")
     assert "servers" not in m["rig"]["roles"]["primary"]["facts"] and m["rig"]["rtt_ms"] == RTT
     # what scenario, defined where; what config; what came in and out
     assert m["scenario"]["name"] == "replica-read-capacity" and m["scenario"]["step"] == "sweep"

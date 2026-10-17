@@ -27,7 +27,7 @@ pass `runs --archive <its directory> ...`.
 | what harness | `harness`: offbench commit, branch, dirty flag, remote, and a snapshot of every file that ran (uncommitted changes and untracked files included, keys and host files never) |
 | what binary | `builds`: per build the valkey commit and server arguments, then each binary by sha256 with the hosts that ran it, its version line, build id, `.text` size, toolchain (from the binary's `.comment`), shared libraries, make settings, release header, and the source tree it was compiled from |
 | what tools, which versions | `tools`: cachecannon (vendored source, upstream commit, Cargo version and lock hash, binary sha256, toolchain), valkey-cli; `rig.roles.*.facts.tools` and `packages`: gcc, glibc, kernel, python, ethtool, util-linux and the rest, as installed |
-| on what hosts | `rig.roles`: per role the instance type, id, AZ, placement group, AMI, OS release, kernel, CPU model and count, memory, NICs and drivers, sysctls, THP, open-file limits, the pintune layout and chrony's offset; `rig.rtt_ms`: every path's round trip |
+| on what hosts | `rig.roles`: per role the OS release, kernel, CPU model and count, memory, NICs and drivers, sysctls, THP, open-file limits, the pintune layout and chrony's offset, from the host; the instance type and id from its DMI; the AMI, zone and placement group from `aws ec2 describe-instances` on the orchestrator, by the registry's instance ids (`OFFBENCH_AWS_PROFILE` names the profile); `rig.rtt_ms`: every path's round trip |
 | what came in and out | `inputs.calibration` (the file, its sha256 and the run that made it); `outputs`: record counts and the calibration a calibrate run produced; `result.txt` |
 | what is missing | `gaps`: anything not captured, in words; `warnings`: things to check, such as a dirty harness or two hosts running different binaries for one commit |
 
@@ -80,7 +80,10 @@ python3 -m offbench runs import data/repl/<name>.jsonl --calibration data/repl/<
 ```
 
 An imported run keeps its records as they were and lists what was never captured (binaries, host facts, tool
-versions) under gaps. With `--harness-repo` its harness snapshot is taken from that commit.
+versions) under gaps. With `--harness-repo` its harness snapshot is taken from that commit. `--scenario-version`
+gives the method version the run followed. `--argv` with `--argv-source` and `--driver` record the command its
+driver ran and archive the driver. `--host-facts` attaches facts found elsewhere (instance type, AMI, zone,
+placement group, login user, launch user data), kept under `declared`, apart from anything observed.
 
 ## Not archived yet
 
