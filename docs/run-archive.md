@@ -83,7 +83,9 @@ An imported run keeps its records as they were and lists what was never captured
 versions) under gaps. With `--harness-repo` its harness snapshot is taken from that commit. `--scenario-version`
 gives the method version the run followed. `--argv` with `--argv-source` and `--driver` record the command its
 driver ran and archive the driver. `--host-facts` attaches facts found elsewhere (instance type, AMI, zone,
-placement group, login user, launch user data), kept under `declared`, apart from anything observed.
+placement group, login user, launch user data), kept under `declared`, apart from anything observed. The import
+also archives the offbench doing it (`archived_by`): an older harness lacks the `runs` commands and
+`scripts/host-userdata.sh`, and REPRODUCE.md points there for them.
 
 ## Not archived yet
 

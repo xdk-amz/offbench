@@ -89,8 +89,10 @@ def _hosts(m: dict, archive, run_dir: Path) -> list:
         d = r.get("declared") or {}
         if not r.get("facts") and "user_data" in d:
             groups.setdefault((d["user_data"] or {}).get("object"), []).append(role)
+    old = (h.get("has") or {}).get("offbench/archive.py") is False
     script = ("`scripts/host-userdata.sh` from the harness (section 3)" if has_ud else
-              "`scripts/host-userdata.sh` of a newer offbench checkout (this run's harness predates it)")
+              "`scripts/host-userdata.sh` in `offbench-tools` (see the top)" if old else
+              f"`scripts/host-userdata.sh` of a newer offbench (`git clone {h.get('remote') or '<the offbench repository>'}`)")
     how = "with the user data below" if groups else f"with {script} as user data"
     L.append(f"Launch {len(roles)} hosts like the original ones, one per role, {how}:")
     L.append("")
@@ -226,8 +228,12 @@ def _hosts_file(m: dict) -> list:
             *("    " + l for l in entries.splitlines()), "    ]}", "",
             "    export OFFBENCH_HOSTS_FILE=$PWD/hosts.json",
             "    export OFFBENCH_KEY=<private key whose public key is in each host's ~/.ssh/authorized_keys>",
-            "    export OFFBENCH_KNOWN_HOSTS=$PWD/known_hosts   # every host's key; known_hosts.example says how",
-            "", "With a hosts file named this way offbench takes no leases. The README's \"Hosts and leases\" section "
+            "    export OFFBENCH_KNOWN_HOSTS=$PWD/known_hosts", "",
+            "`known_hosts` holds every host's keys under the addresses in `hosts.json`. Collect them once the hosts are "
+            "up, and check their fingerprints (`ssh-keygen -lf known_hosts`) against the ones each instance prints to "
+            "its console on first boot (`aws ec2 get-console-output`) before trusting them:", "",
+            "    ssh-keyscan -t ed25519,ecdsa <address> <address> ... >> known_hosts", "",
+            "With a hosts file named this way offbench takes no leases. The README's \"Hosts and leases\" section "
             "has the details."]
 
 
@@ -344,7 +350,9 @@ def _run(m: dict, run_dir: Path, archive=None) -> list:
         L += [f"This sweep ran under calibration `{inp.get('id')}`"
               + (f", made by run `{inp['archive_run']}`" if inp.get("archive_run") else "")
               + ". Copy it into the harness directory so every build gets the same primary load:", "",
-              f"    mkdir -p data/repl && cp \"$RUN\"/calibration.json data/repl/{label}-calib.json", ""]
+              f"    mkdir -p data/repl && cp \"$RUN\"/calibration.json data/repl/{label}-calib.json", "",
+              "(`repl-calibrate --out X.jsonl` writes its records there and the calibration beside them as `X.json`, "
+              "the file `--calibration` reads; `calibration.json` is that file.)", ""]
     if cmd.get("argv") is None:
         L.append("The command line was not recorded. `manifest.json` has the configuration the records show "
                  "(`config`), and `records.jsonl` every rep's cell.")
@@ -358,6 +366,11 @@ def _run(m: dict, run_dir: Path, archive=None) -> list:
           "With this checkout's paths, in the shell where section 4's three exports are set (the command needs "
           "`OFFBENCH_KEY` and `OFFBENCH_KNOWN_HOSTS`, and finds the hosts through `OFFBENCH_HOSTS_FILE`):", "",
           "    python3 -m offbench " + shlex.join(rewrite_argv(cmd["argv"], name, label)), ""]
+    names = [b["name"] for b in m.get("builds") or [] if b.get("name")]
+    if names:
+        L += ["The builds' names (" + ", ".join(f"`{n}`" for n in names) + ") are this run's own labels, set by "
+              + ("the calibration's `--bins` and carried in `calibration.json`" if inp else "`--bins`")
+              + "; the scenario doc's examples may use others.", ""]
     if m.get("seconds") is not None:
         s = m["seconds"]
         L.append(f"It took {s // 60} min." if s >= 60 else f"It took {s} s.")
@@ -376,7 +389,10 @@ def _compare(m: dict) -> list:
         first = f"Compare the new `data/repl/{label}-repro.json` (targets and each build's `shape`) with `result.txt`."
     else:
         first = (f"    python3 -m offbench repl-capacity data/repl/{label}-repro.jsonl\n\n"
-                 "and set its table beside `result.txt`.")
+                 "and set its table beside `result.txt`. For each build it reports the highest median replica read "
+                 "rate (valid reps) over the steps below the first one where the replica fell behind in any rep; a "
+                 "step counts when the replica kept up in every rep and most reps were valid (`outcome` in "
+                 "`offbench/replcap.py`).")
     h = m.get("harness") or {}
     if (h.get("has") or {}).get("offbench/archive.py") is False:
         tail = ("This run's harness predates the archive, so the new run is not archived: its records are the "
@@ -390,6 +406,24 @@ def _compare(m: dict) -> list:
     return [first, "", tail]
 
 
+def _tools(m: dict, archive, run_dir: Path) -> list:
+    """For a harness older than the archive: where to get an offbench that has what it lacks."""
+    ab = m.get("archived_by") or {}
+    obj = (ab.get("snapshot") or {}).get("object")
+    show = f"`cd offbench-tools && python3 -m offbench runs --archive \"$RUN\"/../.. show {m['id']}`"
+    head = ("This run's harness (section 3) predates the archive: it has no `runs` commands, no "
+            "`scripts/host-userdata.sh` and no list of the scenario's versions.")
+    if obj and archive is not None:
+        return [f"{head} The offbench that imported the run has them and is archived with it (commit "
+                f"`{ab.get('commit') or '?'}`" + (f" of {ab['remote']}" if ab.get("remote") else "")
+                + "). Unpack it once, in any writable directory, as `offbench-tools`:", "",
+                f"    mkdir offbench-tools && gzip -dc {_rel(archive, run_dir, obj)} | tar -x -C offbench-tools", "",
+                f"For example: {show}."]
+    remote = (m.get("harness") or {}).get("remote") or "<the offbench repository>"
+    return [f"{head} Any offbench commit with `offbench/archive.py` has them: `git clone {remote} offbench-tools`, "
+            f"then for example {show}."]
+
+
 def reproduce_md(m: dict, run_dir: Path, archive) -> str:
     sc, o = m.get("scenario") or {}, m.get("outputs") or {}
     h = m.get("harness") or {}
@@ -397,22 +431,25 @@ def reproduce_md(m: dict, run_dir: Path, archive) -> str:
     given = ", assigned when it was imported" if sc.get("version_given_at_import") else ""
     version = (f"version {v}{given}: {sc['method']}" if v is not None and sc.get("method")
                else f"version {v}{given}" if v is not None else "version unknown")
-    where = ("from the harness of section 3" if (h.get("has") or {}).get("offbench/archive.py") is not False
-             else "from a newer offbench checkout (this run's harness predates the archive and has no `runs`)")
+    old = (h.get("has") or {}).get("offbench/archive.py") is False
     L = [f"# Reproduce {m['id']}", "", f"> {sc.get('question', '')}", "",
          f"This directory is one run: step `{sc.get('step')}` of scenario `{sc.get('name')}` ({version}). The "
-         f"scenario is defined in `{sc.get('doc')}` of the harness below; its versions are listed in that doc in "
-         f"newer harnesses. It ran from {m.get('started')} to "
+         f"scenario is defined in `{sc.get('doc')}` of the harness below."
+         + (" That copy predates the list of the scenario's versions; `offbench-tools` (below) has it." if old else "")
+         + f" It ran from {m.get('started')} to "
          f"{m.get('ended')} and ended `{m.get('status')}`. `result.txt` holds its result, `records.jsonl` its "
          f"{o.get('records', 0)} reps ({o.get('valid', 0)} valid), and `manifest.json` every detail used here.", "",
          "Commands below refer to this directory as `$RUN`, and to the archive's objects relative to it. Set it "
          "first (this is where the run was archived; use its new place if the archive moved):", "",
          f"    RUN={run_dir}", "",
          "The archive is `\"$RUN\"/../..`. The `runs` commands read it only when given `--archive \"$RUN\"/../..`; "
-         f"without it they read `$OFFBENCH_ARCHIVE` or `~/offbench-runs`. For example, {where}: "
-         f"`python3 -m offbench runs --archive \"$RUN\"/../.. show {m['id']}`.", "",
-         "An object is a gzip file named by the sha256 of what it holds: `gzip -dc <object>` gives that file (or "
-         "tar). `python3 -m offbench runs bundle` packs a run with its objects for another machine."]
+         "without it they read `$OFFBENCH_ARCHIVE` or `~/offbench-runs`."
+         + ("" if old else " For example, from the harness of section 3: "
+            f"`python3 -m offbench runs --archive \"$RUN\"/../.. show {m['id']}`."), ""]
+    if old:
+        L += _tools(m, archive, run_dir) + [""]
+    L += ["An object is a gzip file named by the sha256 of what it holds: `gzip -dc <object>` gives that file (or "
+          "tar). `python3 -m offbench runs bundle` packs a run with its objects for another machine."]
     if m.get("status") == "imported":
         L += ["", "This run was recorded before the archive existed, so parts of what follows are unknown; the Gaps "
               "section lists them."]

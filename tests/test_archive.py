@@ -494,8 +494,11 @@ def test_reproduce_md_names_hosts_tools_binaries_and_the_exact_command(tmp_path,
                  "python3 -m offbench " + " ".join(argv[:1]), "--calibration data/repl/c2-calib.json",
                  "--out data/repl/c2-repro.jsonl", "repl-capacity data/repl/c2-repro.jsonl",
                  f"runs --archive \"$RUN\"/../.. show {m['id']}", "in the shell where section 4's three exports are set",
-                 "This run had no host of its own for the replica readers"):
+                 "This run had no host of its own for the replica readers", "the file `--calibration` reads",
+                 "For example, from the harness of section 3: ", "ssh-keyscan -t ed25519,ecdsa",
+                 "set by the calibration's `--bins` and carried in `calibration.json`"):
         assert want in doc, want
+    assert "offbench-tools" not in doc and "predates the archive" not in doc
     assert "/keys/bench.pem" not in doc.split("The original command")[1].split("With this checkout")[1]
     snap = m["harness"]["snapshot"]["object"]
     assert f"gzip -dc \"$RUN\"/{os.path.relpath(store.object_path(snap), d)} | tar -x -C offbench" in doc
@@ -641,18 +644,28 @@ def test_import_with_declared_facts_command_and_version_tells_the_operator_what_
     assert m["scenario"]["version_given_at_import"] and m["command"]["argv"] == argv
     assert m["rig"]["roles"]["rgen2"]["declared"]["instance_type"] == "c8g.metal-24xl"
     assert m["harness"]["has"]["offbench/archive.py"] is False and m["config"]["pinned"] is True
-    assert {w for _, w in archive.objects_of(m)} >= {"driver script", "host user data", "harness snapshot"}
+    assert {w for _, w in archive.objects_of(m)} >= {"driver script", "host user data", "harness snapshot",
+                                                     "offbench that imported the run"}
+    assert m["archived_by"]["has"]["offbench/archive.py"] is True
     doc = (run.dir / "REPRODUCE.md").read_text()
     for want in ("version 1, assigned when it was imported: every build's writers",
-                 "from a newer offbench checkout (this run's harness predates the archive",
+                 "This run's harness (section 3) predates the archive: it has no `runs` commands",
+                 "    mkdir offbench-tools && gzip -dc \"$RUN\"/../../objects/",
+                 "`cd offbench-tools && python3 -m offbench runs --archive \"$RUN\"/../.. show ",
+                 "That copy predates the list of the scenario's versions",
                  "they come from aws ec2 describe-instances after the run", "c8g.metal-24xl", "ami-0fa4996c14e7d501e",
                  "al2023-ami-2023.12.20260909.0-kernel-6.1-arm64", "placement group originally none",
                  "split evenly across 2 hosts", "Log in as `ec2-user`", "- User data of rgen, rgen2: `gzip -dc",
                  "primary, replica, gen had no user data; how they were set up was not recorded",
-                 "of a newer offbench checkout (this run's harness predates it)",
+                 "`scripts/host-userdata.sh` in `offbench-tools` (see the top)",
+                 "    ssh-keyscan -t ed25519,ecdsa <address> <address> ... >> known_hosts",
+                 "The builds' names (`stock`) are this run's own labels, set by `--bins`",
+                 "the highest median replica read rate",
                  "its release fixes the package repository", "this one is from rerun16.sh, the driver that ran it",
                  "The driver script is archived", "--calibration data/repl/c16-calib.json",
                  "Every rep of this run was pinned", "the new run is not archived"):
         assert want in doc, want
+    assert "known_hosts.example" not in doc and "newer harnesses" not in doc
+    assert "archived_by.snapshot.object" in archive.ARCHIVE_MD
     assert archive.verify(store, run.dir) == []
     assert "Log in as `?`" not in doc and "originally ?" not in doc

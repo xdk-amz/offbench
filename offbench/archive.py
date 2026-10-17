@@ -81,16 +81,21 @@ HARNESS_FILES = ("offbench/archive.py", "scripts/host-userdata.sh", "scripts/pin
 
 ARCHIVE_MD = """# offbench run archive
 
-One directory per benchmark invocation under runs/, content-addressed blobs under objects/.
+One directory per benchmark invocation under runs/, content-addressed blobs under objects/. All of it is plain
+files: manifest.json and records.jsonl are JSON, REPRODUCE.md and result.txt are text, and an object is a gzip
+file named by the sha256 of what it holds (`gzip -dc objects/<aa>/<sha256>.gz`). Each run's REPRODUCE.md says
+how to run it again on new hosts; start there.
 
-Read it from an offbench checkout (any run's harness snapshot is one; its REPRODUCE.md says how to unpack it),
-naming this directory, since without --archive the commands read $OFFBENCH_ARCHIVE or ~/offbench-runs:
+The `runs` commands list, show and check runs. They need an offbench checkout that has `offbench/archive.py`.
+A run's harness snapshot (`harness.snapshot.object` in its manifest.json) has it, unless the run is older than
+the archive; then use the snapshot of the offbench that imported it (`archived_by.snapshot.object`):
 
-    python3 -m offbench runs --archive <this directory> list
-    python3 -m offbench runs --archive <this directory> show <run id>
+    mkdir offbench && gzip -dc objects/<aa>/<sha256>.gz | tar -x -C offbench && cd offbench
+    python3 -m offbench runs --archive <path of this directory> list
+    python3 -m offbench runs --archive <path of this directory> show <run id>
 
-Each run's REPRODUCE.md says how to run it again on new hosts. Files in a sealed run are read-only: never edit
-them. A correction is a new run; link it with `runs note <new> --supersedes <old> --text ...`.
+Without --archive they read $OFFBENCH_ARCHIVE or ~/offbench-runs. Files in a sealed run are read-only: never
+edit them. A correction is a new run; link it with `runs note <new> --supersedes <old> --text ...`.
 This directory holds host names, addresses and instance ids: do not publish it as it is.
 """
 
@@ -813,6 +818,9 @@ def objects_of(m: dict) -> list:
         out.append((h["snapshot"]["object"], "harness snapshot"))
     if h.get("diff_object"):
         out.append((h["diff_object"], "harness uncommitted diff"))
+    own = ((m.get("archived_by") or {}).get("snapshot") or {}).get("object")
+    if own and own != (h.get("snapshot") or {}).get("object"):
+        out.append((own, "offbench that imported the run"))
     drv = (m.get("command") or {}).get("driver") or {}
     if drv.get("object"):
         out.append((drv["object"], "driver script"))
@@ -953,6 +961,10 @@ def show(m: dict, notes: list = (), run_dir: Optional[Path] = None) -> str:
                  + (f"; evidence: {h['evidence']}" if h.get("evidence") else ""))
     else:
         L.append("harness   not recorded")
+    ab = m.get("archived_by") or {}
+    if ab:
+        L.append(f"imported  by offbench {ab.get('describe') or ab.get('commit') or '?'}, snapshot "
+                 f"{_short((ab.get('snapshot') or {}).get('object'), 16)}")
     if c:
         bits = [f"cores {','.join(str(x) for x in c.get('cores') or [])}"]
         if c.get("replica_reader_conns") is not None:
@@ -1093,6 +1105,12 @@ def import_records(archive: Archive, records: Path, *, label: Optional[str] = No
         m["scenario"]["doc_sha256"] = (m["harness"].get("docs") or {}).get(m["scenario"]["doc"])
     else:
         run.gap("harness commit unknown")
+    try:          # the offbench doing the import: it has the `runs` commands an older harness lacks
+        own = harness(Path(__file__).resolve().parent.parent, archive)
+        m["archived_by"] = {k: own[k] for k in ("commit", "describe", "dirty", "remote", "remote_branches_with_commit",
+                                                "snapshot", "has") if k in own}
+    except Exception as e:      # noqa: BLE001 - provenance only; the import goes on
+        run.gap(f"the importing offbench could not be archived: {type(e).__name__}: {e}")
     first_rec = recs[0]
     declared = json.loads(json.dumps((host_facts or {}).get("hosts") or {}))    # a copy: user_data paths become objects
     m["rig"] = {"rtt_ms": first_rec.get("rtt_ms"),
