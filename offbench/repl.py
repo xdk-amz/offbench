@@ -365,7 +365,8 @@ def agent(a: dict) -> dict:
         text = cachecannon_toml(cell, window_s=a["window_s"], threads=a["threads"], cpu_list=a["cpus"],
                                 endpoint=f"{a['target_ip']}:{PORT}", prefill=a["prefill"], duration_s=a["duration_s"],
                                 readonly=bool(a.get("readonly")),
-                                rate_burst_us=int(a.get("rate_burst_us") or 0))
+                                rate_burst_us=int(a.get("rate_burst_us") or 0),
+                                timestamps=a.get("timestamps") or "userspace")
         toml.write_text(text)
         out, err = WORK / f"{a['name']}.json", WORK / f"{a['name']}.err"
         launch = ["taskset", "-c", a["cpus"], "setsid", "-f", str(CACHECANNON), str(toml)]
@@ -886,6 +887,7 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
                    ssh.call(G, {"action": "gen_start", "name": "writer", "workload": "set", "target_ip": P.ip,
                                 "pipeline": cell.w_pipeline, "conns": cell.w_conns, "prefill": True,
                                 "rate": int(os.environ.get("OFFBENCH_W_RATE") or 0),
+                                "timestamps": os.environ.get("OFFBENCH_TIMESTAMPS") or "userspace",
                                 "rate_burst_us": int(os.environ.get("OFFBENCH_RATE_BURST_US") or 0),
                                 "cpus": cell.cpus("writer", own)[0],
                                 "threads": cell.threads("writer", own), "duration_s": 240, **gen})):
@@ -905,6 +907,7 @@ def run_one(ssh: Ssh, roles: dict, cell: ReplCell, b: ReplBin, rep: int, *, wind
                                                  "target_ip": P.ip, "pipeline": cell.pp_pipeline,
                                                  "conns": cell.p_conns, "prefill": False,
                                                  "rate": int(os.environ.get("OFFBENCH_P_RATE") or 0),
+                                                 "timestamps": os.environ.get("OFFBENCH_TIMESTAMPS") or "userspace",
                                                  "rate_burst_us": int(os.environ.get("OFFBENCH_RATE_BURST_US") or 0),
                                                  "cpus": cell.cpus("preader", own)[0],
                                                  "threads": cell.threads("preader", own),

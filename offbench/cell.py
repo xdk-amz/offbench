@@ -204,7 +204,8 @@ def thread_cpu(a: dict[int, tuple[str, float]], b: dict[int, tuple[str, float]],
 def cachecannon_toml(cell: Cell, window_s: int = 6, warmup_s: int = 3, timeout: str = "1s",
                      threads: Optional[int] = None, nproc: int = 1, cpu_list: Optional[str] = None,
                      endpoint: str = f"{HOST}:{PORT}", prefill: bool = True,
-                     duration_s: Optional[int] = None, readonly: bool = False, rate_burst_us: int = 0) -> str:
+                     duration_s: Optional[int] = None, readonly: bool = False, rate_burst_us: int = 0,
+                     timestamps: str = "userspace") -> str:
     """Emit the cachecannon TOML for a cell. Port of cccell.sh mkcfg.
 
     DIV-5: duration is derived from the window (window_s + 18) so warmup (3) +
@@ -216,7 +217,8 @@ def cachecannon_toml(cell: Cell, window_s: int = 6, warmup_s: int = 3, timeout: 
     process per share); nproc=1 is the canary reference and leaves them whole.
     With a rate, rate_burst_us bounds how far the generator may run ahead after falling behind (that many
     microseconds of requests) and starts it with none banked; 0 keeps cachecannon's default of a full
-    second, banked from the start.
+    second, banked from the start. timestamps is cachecannon's [timestamps] mode: "software" times each
+    request from the kernel's send to its receive timestamp, leaving out the generator's own scheduling.
     """
     g, s = {"get": (100, 0), "set": (0, 100), "mixed": (80, 20)}[cell.workload]
     lines = ["[general]", f'duration = "{duration_s or window_s + 18}s"', f'warmup = "{warmup_s}s"']
@@ -240,7 +242,7 @@ def cachecannon_toml(cell: Cell, window_s: int = 6, warmup_s: int = 3, timeout: 
         "[workload.keyspace]", "length = 16", f"count = {cell.keys}", 'distribution = "uniform"',
         "[workload.commands]", f"get = {g}", f"set = {s}",
         "[workload.values]", f"length = {cell.value_size}",
-        "[timestamps]", "enabled = true", 'mode = "userspace"',
+        "[timestamps]", "enabled = true", f'mode = "{timestamps}"',
         "[admin]", 'format = "json"', 'color = "never"',
     ]
     return "\n".join(lines) + "\n"
