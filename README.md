@@ -114,7 +114,8 @@ cd ~/offbench-src && python3 -m offbench --root ~/offbench run \
 vendored copy itself.
 
 Queue from anywhere (bins are `name=commit@branch`, `:stock` marks side A; a bare
-name uses `bins.json` or the legacy `~/<name>/src/valkey-server` on the host):
+name uses `bins.json` or the legacy `~/<name>/src/valkey-server` on the host; each `|config value`
+after a bin is passed to that build's server as `--config value`):
 
 ```
 python3 -m offbench queue add --bins base:stock cc=a8f50bd2c@main-thread-offload-client-control \

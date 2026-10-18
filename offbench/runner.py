@@ -255,7 +255,7 @@ class Runner:
                 t0 = time.time()
                 try:
                     metrics = run_rep(paths, cell, window_s=task.window_s, perf=task.perf,
-                                      dry_run=self.dry_run, log=self.log)
+                                      extra_server_args=b.server_args, dry_run=self.dry_run, log=self.log)
                 except CellError as exc:
                     self.log(f"[{i}/{len(plan)}] {b.name} {cell.key()} rep{rep}: CELL ERROR {exc}")
                     raise

@@ -1932,3 +1932,67 @@ def test_cli_export_repl_writes_the_page_data(monkeypatch, tmp_path):
     bad["builds"] = bad["builds"][:1]
     reg.write_text(json.dumps(bad))
     assert cli.main(["--root", str(tmp_path), "export-repl", "--registry", str(reg)]) == 2
+
+
+# ------------------------------------------------------- per-build server args ----
+
+def test_queue_bins_take_server_configs():
+    from offbench import cli
+    reg = {"base": {"commit": "e082696cf", "branch": "unstable", "label": "stock", "role": "stock"}}
+    a, b, c, d = cli._bins(["lanes=866b5ba64@parallel-writes|keyspace-shard-bits 10|io-threads-parallel-writes yes",
+                            "stock=ea4d4e7d5:stock", "staged=e43737058:stock|keyspace-shard-bits 10",
+                            "base|maxmemory 0"], reg)
+    assert (a.commit, a.branch, a.role) == ("866b5ba64", "parallel-writes", "candidate")
+    assert a.server_args == "--keyspace-shard-bits 10 --io-threads-parallel-writes yes"
+    assert (b.commit, b.role, b.server_args) == ("ea4d4e7d5", "stock", "")
+    assert (c.commit, c.role, c.server_args) == ("e43737058", "stock", "--keyspace-shard-bits 10")
+    assert (d.commit, d.label, d.server_args) == ("e082696cf", "stock", "--maxmemory 0")
+
+
+def test_runner_passes_each_builds_server_args(tmp_path, monkeypatch):
+    from offbench import runner as runner_mod
+    seen = []
+
+    def fake_run_rep(paths, cell, **kw):
+        seen.append((paths.server.parent.name, kw.get("extra_server_args")))
+        return Metrics(kcmd_s=1.0)
+
+    monkeypatch.setattr(runner_mod, "run_rep", fake_run_rep)
+    monkeypatch.setattr(runner_mod, "host_identity", lambda: {"id": "t"})
+    r = runner_mod.Runner(tmp_path, repo=tmp_path, cli=Path("/x/valkey-cli"), cachecannon=Path("/x/cc"), dry_run=True)
+    t = Task(kind="canary", bins=[Bin("lanes", commit="866b5ba64", server_args="--keyspace-shard-bits 10"),
+                                  Bin("stock", commit="ea4d4e7d5")],
+             workloads=["set"], pipelines=[16], conns=[64], io_threads=[4], reps=1)
+    r.run_task(t)
+    assert sorted(seen) == [("866b5ba64", "--keyspace-shard-bits 10"), ("ea4d4e7d5", "")]
+    got = [json.loads(l)["bin"]["server_args"] for l in (tmp_path / "results.jsonl").read_text().splitlines()]
+    assert sorted(got) == ["", "--keyspace-shard-bits 10"]
+
+
+def test_record_roundtrip_keeps_server_args_and_thread_cpu():
+    r = rec("a", Cell("set", 16, 7000), 1, 9000.0)
+    r.bin.server_args = "--keyspace-shard-bits 10"
+    r.metrics.server_cpu_cores = 15.2
+    r.metrics.thread_cpu_pct = {"main": 40.0, "io_thd_1": 99.5}
+    r2 = Record.from_dict(json.loads(r.to_json()))
+    assert r2.bin.server_args == "--keyspace-shard-bits 10"
+    assert r2.metrics.server_cpu_cores == 15.2 and r2.metrics.thread_cpu_pct["io_thd_1"] == 99.5
+    old = json.loads(r.to_json())
+    del old["bin"]["server_args"], old["metrics"]["thread_cpu_pct"], old["metrics"]["server_cpu_cores"]
+    r3 = Record.from_dict(old)
+    assert r3.bin.server_args == "" and r3.metrics.thread_cpu_pct is None
+
+
+def test_thread_cpu_names_threads_and_drops_idle_ones(monkeypatch):
+    import os
+    from offbench import cell as cellmod
+    monkeypatch.setattr(cellmod, "CLK_TCK", 100)
+    a = {10: ("main", 0.0), 11: ("io_thd_1", 0.0), 12: ("io_thd_2", 0.0), 13: ("bio_aof", 5.0),
+         14: ("jemalloc_bg_thd", 0.0), 15: ("jemalloc_bg_thd", 0.0)}
+    b = {10: ("main", 300.0), 11: ("io_thd_1", 597.0), 12: ("io_thd_2", 600.0), 13: ("bio_aof", 5.0),
+         14: ("jemalloc_bg_thd", 3.0), 15: ("jemalloc_bg_thd", 6.0), 16: ("io_thd_3", 50.0)}
+    got = cellmod.thread_cpu(a, b, 6.0)
+    assert got == {"main": 50.0, "io_thd_1": 99.5, "io_thd_2": 100.0, "jemalloc_bg_thd:14": 0.5,
+                   "jemalloc_bg_thd:15": 1.0}
+    mine = cellmod.thread_ticks(os.getpid())
+    assert mine[os.getpid()][0] == "main"

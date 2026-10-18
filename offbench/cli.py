@@ -55,9 +55,12 @@ def _strs(s: str) -> list[str]:
 
 
 def _bins(specs: list[str], registry: dict) -> list[Bin]:
-    """name[=commit][@branch][:stock]  or a bare registry name."""
+    """name[=commit][@branch][:stock][|config value...]  or a bare registry name (which may also take
+    |config value). Each |config value becomes --config value on that build's server."""
     out = []
     for spec in specs:
+        spec, *cfg = spec.split("|")
+        server_args = " ".join(f"--{c.strip()}" for c in cfg if c.strip())
         role = "candidate"
         if spec.endswith(":stock"):
             spec, role = spec[:-6], "stock"
@@ -69,6 +72,8 @@ def _bins(specs: list[str], registry: dict) -> list[Bin]:
             b = Bin(name=name, commit=commit or None, branch=branch or None, label=name, role=role)
         if role == "stock":
             b.role = "stock"
+        if server_args:
+            b.server_args = server_args
         out.append(b)
     return out
 
@@ -1180,7 +1185,8 @@ def main(argv=None) -> int:
     qs = q.add_subparsers(dest="qcmd", required=True)
     qa = qs.add_parser("add")
     qa.add_argument("--kind", default="matrix", choices=("matrix", "sweep", "canary"))
-    qa.add_argument("--bins", nargs="+", required=True, help="name[=commit][@branch][:stock] ...")
+    qa.add_argument("--bins", nargs="+", required=True,
+                    help="name[=commit][@branch][:stock][|config value...] ... (|config value: that build's server only)")
     qa.add_argument("--workloads", default="get,set,mixed")
     qa.add_argument("--pipelines", default="1,16")
     qa.add_argument("--conns", default="2400,7000")

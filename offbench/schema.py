@@ -24,6 +24,7 @@ class Bin:
     role: str = "candidate"        # stock | candidate | variant
     make_args: str = ""
     text_bytes: Optional[int] = None
+    server_args: str = ""          # extra valkey-server arguments for this build, e.g. "--keyspace-shard-bits 10"
 
 
 @dataclass
@@ -86,6 +87,8 @@ class Metrics:
     perf: Optional[Perf] = None
     latency: Optional[Latency] = None
     span_s: Optional[float] = None       # measured counter span the rates divide by
+    server_cpu_cores: Optional[float] = None    # CPU of every server thread over the window, in cores
+    thread_cpu_pct: Optional[dict] = None       # per server thread (name, tid when names repeat): CPU % over the window
 
 
 @dataclass

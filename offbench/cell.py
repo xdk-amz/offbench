@@ -163,6 +163,38 @@ def proc_cpu_ticks(pids: list[int]) -> float:
     return total
 
 
+def thread_ticks(pid: int) -> dict[int, tuple[str, float]]:
+    """tid -> (thread name, utime + stime) for every thread of a process; main is named main."""
+    out: dict[int, tuple[str, float]] = {}
+    try:
+        tids = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return out
+    for t in tids:
+        try:
+            st = Path(f"/proc/{pid}/task/{t}/stat").read_text()
+        except OSError:
+            continue
+        comm = st[st.index("(") + 1:st.rindex(")")]
+        f = st.rsplit(")", 1)[1].split()
+        out[int(t)] = ("main" if int(t) == pid else comm, float(f[11]) + float(f[12]))
+    return out
+
+
+def thread_cpu(a: dict[int, tuple[str, float]], b: dict[int, tuple[str, float]], seconds: float) -> dict[str, float]:
+    """CPU % per thread between two thread_ticks readings, for threads alive at both and above 0.1%.
+    A name that more than one thread carries gets its tid appended."""
+    names = [b[t][0] for t in b if t in a]
+    out = {}
+    for t, (name, ticks) in sorted(b.items()):
+        if t not in a or seconds <= 0:
+            continue
+        pct = (ticks - a[t][1]) / CLK_TCK / seconds * 100.0
+        if pct >= 0.1:
+            out[name if names.count(name) == 1 else f"{name}:{t}"] = round(pct, 1)
+    return out
+
+
 def cachecannon_toml(cell: Cell, window_s: int = 6, warmup_s: int = 3, timeout: str = "1s",
                      threads: Optional[int] = None, nproc: int = 1, cpu_list: Optional[str] = None,
                      endpoint: str = f"{HOST}:{PORT}", prefill: bool = True,
@@ -400,6 +432,7 @@ def run_rep(paths: Paths, cell: Cell, *, window_s: int = 6, perf: bool = False, 
     u_a = time.time()
     a_cpu = thread_cpu_ticks(sp)
     a_cc = proc_cpu_ticks(cc_pids)
+    a_thr = thread_ticks(sp)
 
     perf_text = ""
     if perf:
@@ -413,6 +446,7 @@ def run_rep(paths: Paths, cell: Cell, *, window_s: int = 6, perf: bool = False, 
     u_b = time.time()
     b_cpu = thread_cpu_ticks(sp)
     b_cc = proc_cpu_ticks(cc_pids)
+    b_thr = thread_ticks(sp)
     cc_threads_n = sum(len(os.listdir(f"/proc/{p}/task")) for p in cc_pids if Path(f"/proc/{p}/task").exists())
     clients = info_int(paths, "clients", "connected_clients", acl=cell.acl)
     fp_batches = info_int(paths, "all", "fastpath_batches", acl=cell.acl)
@@ -439,6 +473,7 @@ def run_rep(paths: Paths, cell: Cell, *, window_s: int = 6, perf: bool = False, 
     # and the /proc span (u_a..u_b). An INFO round trip against thousands of
     # saturating clients takes tens of ms, so the nominal window understates both.
     span, uspan = w_b - w_a, u_b - u_a
+    thr = thread_cpu(a_thr, b_thr, uspan)
     return Metrics(
         kcmd_s=cmds / span / 1000.0,
         main_active_pct=(b_act - a_act) / span * 100.0 if b_act else None,
@@ -453,4 +488,6 @@ def run_rep(paths: Paths, cell: Cell, *, window_s: int = 6, perf: bool = False, 
         gen_err_pct=err_pct,
         perf=parse_perf_stat(perf_text, cmds) if perf_text else None,
         latency=latency,
+        server_cpu_cores=round(sum(thr.values()) / 100.0, 2) if thr else None,
+        thread_cpu_pct=thr or None,
     )
