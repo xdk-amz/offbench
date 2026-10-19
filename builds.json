@@ -450,6 +450,64 @@
     }
    ],
    "ref": "stock-ea4d4e7d5"
+  },
+  {
+   "id": "unstable-035b8d61d",
+   "label": "unstable 035b8d61d",
+   "commit": "035b8d61d",
+   "branch": "unstable",
+   "sources": [
+    {
+     "session": "20261018T200340.598Z",
+     "bin": "unstable-035b8d61d"
+    },
+    {
+     "session": "20261018T200344.036Z",
+     "bin": "unstable-035b8d61d"
+    },
+    {
+     "session": "20261018T200347.387Z",
+     "bin": "unstable-035b8d61d"
+    },
+    {
+     "session": "20261018T183913.032Z",
+     "bin": "unstable-035b8d61d"
+    },
+    {
+     "session": "20261018T183919.884Z",
+     "bin": "unstable-035b8d61d"
+    }
+   ],
+   "ref": "unstable-035b8d61d"
+  },
+  {
+   "id": "staged-2f6abbb90",
+   "label": "staged 2f6abbb90 (ACL cells with acl-offload yes)",
+   "commit": "2f6abbb90",
+   "branch": "lane",
+   "sources": [
+    {
+     "session": "20261018T200340.598Z",
+     "bin": "staged-2f6abbb90-acl-offload"
+    },
+    {
+     "session": "20261018T200344.036Z",
+     "bin": "staged-2f6abbb90-acl-offload"
+    },
+    {
+     "session": "20261018T200347.387Z",
+     "bin": "staged-2f6abbb90-acl-offload"
+    },
+    {
+     "session": "20261018T183913.032Z",
+     "bin": "staged-2f6abbb90"
+    },
+    {
+     "session": "20261018T183919.884Z",
+     "bin": "staged-2f6abbb90"
+    }
+   ],
+   "ref": "unstable-035b8d61d"
   }
  ]
 }
