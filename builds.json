@@ -328,6 +328,128 @@
     }
    ],
    "ref": "offload-all-3f1ac915d-pin"
+  },
+  {
+   "id": "stock-ea4d4e7d5",
+   "label": "stock valkey (unstable ea4d4e7d5)",
+   "commit": "ea4d4e7d5",
+   "branch": "unstable",
+   "sources": [
+    {
+     "session": "20261018T184240.743Z",
+     "bin": "stock-ea4d4e7d5"
+    },
+    {
+     "session": "20261018T184240.754Z",
+     "bin": "stock-ea4d4e7d5"
+    },
+    {
+     "session": "20261018T184240.765Z",
+     "bin": "stock-ea4d4e7d5"
+    },
+    {
+     "session": "20261018T184240.775Z",
+     "bin": "stock-ea4d4e7d5"
+    },
+    {
+     "session": "20261018T184240.786Z",
+     "bin": "stock-ea4d4e7d5"
+    },
+    {
+     "session": "20261018T184240.797Z",
+     "bin": "stock-ea4d4e7d5"
+    },
+    {
+     "session": "20261018T184240.808Z",
+     "bin": "stock-ea4d4e7d5"
+    },
+    {
+     "session": "20261018T184240.818Z",
+     "bin": "stock-ea4d4e7d5"
+    }
+   ]
+  },
+  {
+   "id": "staged-e43737058",
+   "label": "staged (e43737058)",
+   "commit": "e43737058",
+   "branch": "staged-pr-e43737058",
+   "sources": [
+    {
+     "session": "20261018T184240.743Z",
+     "bin": "staged-e43737058"
+    },
+    {
+     "session": "20261018T184240.754Z",
+     "bin": "staged-e43737058"
+    },
+    {
+     "session": "20261018T184240.765Z",
+     "bin": "staged-e43737058"
+    },
+    {
+     "session": "20261018T184240.775Z",
+     "bin": "staged-e43737058"
+    },
+    {
+     "session": "20261018T184240.786Z",
+     "bin": "staged-e43737058"
+    },
+    {
+     "session": "20261018T184240.797Z",
+     "bin": "staged-e43737058"
+    },
+    {
+     "session": "20261018T184240.808Z",
+     "bin": "staged-e43737058"
+    },
+    {
+     "session": "20261018T184240.818Z",
+     "bin": "staged-e43737058"
+    }
+   ],
+   "ref": "stock-ea4d4e7d5"
+  },
+  {
+   "id": "lanes-866b5ba64",
+   "label": "staged + parallel writes (866b5ba64), keyspace-shard-bits 10",
+   "commit": "866b5ba64",
+   "branch": "parallel-writes-lanes-v12",
+   "sources": [
+    {
+     "session": "20261018T184240.743Z",
+     "bin": "lanes-866b5ba64"
+    },
+    {
+     "session": "20261018T184240.754Z",
+     "bin": "lanes-866b5ba64"
+    },
+    {
+     "session": "20261018T184240.765Z",
+     "bin": "lanes-866b5ba64"
+    },
+    {
+     "session": "20261018T184240.775Z",
+     "bin": "lanes-866b5ba64"
+    },
+    {
+     "session": "20261018T184240.786Z",
+     "bin": "lanes-866b5ba64"
+    },
+    {
+     "session": "20261018T184240.797Z",
+     "bin": "lanes-866b5ba64"
+    },
+    {
+     "session": "20261018T184240.808Z",
+     "bin": "lanes-866b5ba64"
+    },
+    {
+     "session": "20261018T184240.818Z",
+     "bin": "lanes-866b5ba64"
+    }
+   ],
+   "ref": "stock-ea4d4e7d5"
   }
  ]
 }

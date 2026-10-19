@@ -10,12 +10,22 @@
      "branch": "main-thread-offload-replica-reads"},
     {"id": "staged", "label": "staged", "commit": "cbf29c2cf",
      "branch": "main-thread-offload-staged-loop", "replica_args": "--keyspace-shard-bits 10", "share": 1,
-     "note": "main shares a core with the first IO thread; replica keyspace-shard-bits 10"}
+     "note": "main shares a core with the first IO thread; replica keyspace-shard-bits 10"},
+    {"id": "staged-pr", "label": "staged (staged-pr)", "commit": "e43737058", "branch": "staged-pr-e43737058",
+     "replica_args": "--keyspace-shard-bits 10", "primary_args": "", "share": 1,
+     "note": "lanes' base; main shares a core with the first IO thread; replica keyspace-shard-bits 10"},
+    {"id": "lanes", "label": "staged + parallel writes", "commit": "866b5ba64", "branch": "parallel-writes-lanes-v12",
+     "replica_args": "--keyspace-shard-bits 10", "primary_args": "--keyspace-shard-bits 10", "share": 1,
+     "note": "write lanes on primary and replica; keyspace-shard-bits 10 on both"}
   ],
   "runs": [
-    {"file": "repl/pinned-c2-rerun.jsonl", "keep": ["stock", "rrd"], "add": [{"file": "repl/pinned-c2-staged.jsonl"}]},
-    {"file": "repl/pinned-c4.jsonl", "keep": ["stock", "rrd"], "add": [{"file": "repl/pinned-c4-staged.jsonl"}]},
-    {"file": "repl/pinned-c8-rerun.jsonl", "keep": ["stock", "rrd"], "add": [{"file": "repl/pinned-c8-staged.jsonl"}]},
-    {"file": "repl/pinned-c16-rerun.jsonl", "keep": ["stock", "rrd"], "add": [{"file": "repl/pinned-c16-staged.jsonl"}]}
+    {"file": "repl/pinned-c2-rerun.jsonl", "keep": ["stock", "rrd"], "add": [{"file": "repl/pinned-c2-staged.jsonl"},
+      {"file": "repl/pwq-c2.jsonl", "keep": ["staged-pr", "lanes"]}]},
+    {"file": "repl/pinned-c4.jsonl", "keep": ["stock", "rrd"], "add": [{"file": "repl/pinned-c4-staged.jsonl"},
+      {"file": "repl/pwq-c4.jsonl", "keep": ["staged-pr", "lanes"]}]},
+    {"file": "repl/pinned-c8-rerun.jsonl", "keep": ["stock", "rrd"], "add": [{"file": "repl/pinned-c8-staged.jsonl"},
+      {"file": "repl/pwq-c8.jsonl", "keep": ["staged-pr", "lanes"]}]},
+    {"file": "repl/pinned-c16-rerun.jsonl", "keep": ["stock", "rrd"], "add": [{"file": "repl/pinned-c16-staged.jsonl"},
+      {"file": "repl/pwq-c16.jsonl", "keep": ["staged-pr", "lanes"]}]}
   ]
 }
