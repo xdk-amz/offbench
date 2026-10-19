@@ -62,6 +62,12 @@
   .chart { position: relative; height: 300px; }
   .chart.short { position: relative; height: 240px; }
   .empty { color: var(--ob-muted); font-style: italic; padding: 10px 0; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 0 22px 10px; }
+  .chips > span { color: var(--ob-muted); font-size: 12px; margin-right: 2px; }
+  .chips button { background: var(--ob-bg); color: var(--ob-text); border: 1px solid var(--ob-border); border-radius: 6px; padding: 3px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+  .chips button .mut { margin-left: 5px; font-size: 11px; }
+  .chips button.off { opacity: .45; text-decoration: line-through; }
+  .chips button.all { color: var(--ob-accent); border-color: transparent; }
 </style>
 </head>
 <body>
@@ -75,6 +81,7 @@
   <div class="g" id="gRun"><span>run</span><div class="seg" id="cRun"></div></div>
   <div class="g"><span>latency</span><div class="seg" id="cLat"></div></div>
 </div>
+<div class="chips" id="cBuilds"></div>
 </div>
 <main>
 
@@ -222,7 +229,7 @@ function controls() {
 }
 
 function renderCapacity(run) {
-  const t = run.targets, ref = run.sweeps.find(sw => sw.build === D.ref), sep = run.sweeps.filter(sw => sw.measured);
+  const t = run.targets, ref = run.all.find(sw => sw.build === D.ref), sep = run.sweeps.filter(sw => sw.measured);
   $('capTitle').textContent = `Replica read capacity · ${run.cores} cores per server`;
   $('capSub').innerHTML = (t ? `Every build's primary ran at the same <b>${fmtRate(t.x)} writes/s</b> (X) and <b>${fmtRate(t.y)} reads/s</b> (Y); a rep more than ${Math.round(t.tol * 100)}% off either is invalid. `
       : 'This run recorded no X and Y targets, so drift was not checked. ') +
@@ -284,7 +291,7 @@ function renderCurve(run) {
 }
 
 function renderScaling() {
-  const latest = D.cores.map(latestAt), ids = D.builds.map(b => b.id);
+  const latest = D.cores.map(latestAt), ids = D.builds.map(b => b.id).filter(id => !HIDDEN.has(id));
   const capOf = (r, id) => { const sw = r && r.sweeps.find(x => x.build === id); return sw ? { sw } : null; };
   $('scaleTable').innerHTML = `<table><thead><tr><th>build</th>${D.cores.map(c => `<th>${c} cores</th>`).join('')}</tr></thead><tbody>` +
     `<tr><td class="mut">primary X / Y</td>${latest.map(r => `<td class="mut">${r && r.targets ? `${fmtRate(r.targets.x)} / ${fmtRate(r.targets.y)}` : '–'}</td>`).join('')}</tr>` +
@@ -352,7 +359,7 @@ function renderLatency(run) {
   $('latSub').innerHTML = `Client-observed request latency from cachecannon (µs), aggregated over the 6 s window: percentiles are the median across valid reps, max is the max across reps. Ticks on each bar mark the lowest and highest rep for that percentile. Every generator is closed loop, so latency is mostly queueing, roughly requests in flight ÷ throughput. ` +
     `At a load step every build has the same replica reader connections; writers and primary readers have each build's calibrated connection counts (see Load steps), so their latency also reflects those counts. Δ is p99 against ${ref} at the same step. A step where the replica fell behind has no numbers. The selector starts at the highest step where every build kept up.`;
   const rows = run.sweeps.map(sw => { const s = stepAt(sw, n); return { sw, s, L: s && s[S.latGen] }; });
-  const r0 = rows.find(r => r.sw.build === D.ref), refP99 = r0 && r0.L ? r0.L.p99_us : null;
+  const r0 = run.all.find(sw => sw.build === D.ref), s0 = r0 && stepAt(r0, n), refP99 = s0 && s0[S.latGen] ? s0[S.latGen].p99_us : null;
   const status = s => !s ? 'not measured at this step' : s.role === 'behind' ? `<span class="pill behind">fell behind ${s.behind}/${s.n}</span>`
     : s.role === 'invalid' ? `<span class="pill">invalid</span> <span class="mut">${s.note.replace(/^invalid: /, '')}</span>` : 'no latency recorded';
   $('latTable').innerHTML = `<table><thead><tr><th>build</th><th>${rname}</th><th>${mname}</th>${PCT.map(p => `<th>${p[1]} <span class="u">µs</span></th>`).join('')}<th>Δ p99</th><th>reps</th></tr></thead><tbody>` +
@@ -379,9 +386,29 @@ function renderLatency(run) {
   });
 }
 
+// Builds hidden from the view; Δ still resolves against a hidden reference. Kept in localStorage.
+const HIDE_KEY = 'offbench.hidden.replica';
+const HIDDEN = new Set((() => { try { return JSON.parse(localStorage.getItem(HIDE_KEY)) || []; } catch (e) { return []; } })());
+const visible = run => ({ ...run, all: run.sweeps, sweeps: run.sweeps.filter(sw => !HIDDEN.has(sw.build)) });
+function buildChips() {
+  const el = $('cBuilds');
+  el.innerHTML = '<span>builds</span>' + D.builds.map((b, i) =>
+    `<button data-i="${i}" class="${HIDDEN.has(b.id) ? 'off' : ''}" title="${HIDDEN.has(b.id) ? 'show' : 'hide'} ${b.label}"><span class="sw" style="background:${color(b.id)}"></span>${b.label}${b.commit && !b.label.includes(b.commit) ? `<span class="mut">${b.commit}</span>` : ''}</button>`).join('') +
+    (HIDDEN.size ? '<button class="all">show all</button>' : '');
+  el.querySelectorAll('button[data-i]').forEach(btn => btn.onclick = () => {
+    const id = D.builds[+btn.dataset.i].id;
+    HIDDEN.has(id) ? HIDDEN.delete(id) : HIDDEN.add(id);
+    try { localStorage.setItem(HIDE_KEY, JSON.stringify([...HIDDEN])); } catch (e) {}
+    buildChips(); render();
+  });
+  const all = el.querySelector('button.all');
+  if (all) all.onclick = () => { HIDDEN.clear(); try { localStorage.removeItem(HIDE_KEY); } catch (e) {} buildChips(); render(); };
+}
+
 function render() {
-  const run = curRun();
-  if (!run) { $('capTable').innerHTML = '<div class="empty">no run at this core count yet</div>'; return; }
+  const cur = curRun();
+  if (!cur) { $('capTable').innerHTML = '<div class="empty">no run at this core count yet</div>'; return; }
+  const run = visible(cur);
   renderCapacity(run); renderCurve(run); renderLatency(run); renderScaling(); renderSteps(run);
 }
 
@@ -389,7 +416,7 @@ function init(data) {
   D = data;
   if (!D.runs.length) { $('capTable').innerHTML = '<div class="empty">no runs exported yet</div>'; return; }
   S.cores = D.runs[D.runs.length - 1].cores;
-  controls(); render();
+  controls(); buildChips(); render();
 }
 if (window.OFFBENCH_REPL) init(window.OFFBENCH_REPL);
 else fetch('data/replica.json?ts=' + Date.now()).then(r => r.json()).then(init).catch(e => { $('capTable').innerHTML = '<div class="empty">failed to load data/replica.json: ' + e + '</div>'; });

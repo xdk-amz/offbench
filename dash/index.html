@@ -57,6 +57,12 @@
   .chart { position: relative; height: 300px; }
   .chart.short { position: relative; height: 240px; }
   .empty { color: var(--ob-muted); font-style: italic; padding: 10px 0; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 0 22px 10px; }
+  .chips > span { color: var(--ob-muted); font-size: 12px; margin-right: 2px; }
+  .chips button { background: var(--ob-bg); color: var(--ob-text); border: 1px solid var(--ob-border); border-radius: 6px; padding: 3px 9px; font: inherit; font-size: 12px; cursor: pointer; }
+  .chips button .mut { margin-left: 5px; font-size: 11px; }
+  .chips button.off { opacity: .45; text-decoration: line-through; }
+  .chips button.all { color: var(--ob-accent); border-color: transparent; }
 </style>
 </head>
 <body>
@@ -73,6 +79,7 @@
   <div class="g"><span>load</span><div class="seg" id="cRate"></div></div>
   <div class="g"><span>CPU pinning</span><div class="seg" id="cPin"></div></div>
 </div>
+<div class="chips" id="cBuilds"></div>
 </div>
 <main>
 
@@ -163,6 +170,7 @@ function find(build, acl, w, p, conns, iot, rate = S.rate) {
 function rows() {
   const out = [];
   for (const b of CMP.builds) for (const acl of aclList()) {
+    if (HIDDEN.has(b.id)) continue;
     if (CMP.cells.some(c => c.build === b.id && c.acl === acl && c.pipeline === S.pipeline && c.conns === S.conns && c.io_threads === S.io_threads && (c.rate || 0) === S.rate && (c.pin || 0) === S.pin)) out.push({ build: b.id, acl });
   }
   return out;
@@ -237,6 +245,24 @@ function renderLatency() {
   });
 }
 
+// Builds hidden from the view; Δ still resolves against a hidden reference. Kept in localStorage.
+const HIDE_KEY = 'offbench.hidden.compare';
+const HIDDEN = new Set((() => { try { return JSON.parse(localStorage.getItem(HIDE_KEY)) || []; } catch (e) { return []; } })());
+function buildChips() {
+  const el = $('cBuilds');
+  el.innerHTML = '<span>builds</span>' + CMP.builds.map((b, i) =>
+    `<button data-i="${i}" class="${HIDDEN.has(b.id) ? 'off' : ''}" title="${HIDDEN.has(b.id) ? 'show' : 'hide'} ${b.label}"><span class="sw" style="background:${color(b.id, 0)}"></span>${b.label}${b.commit && !b.label.includes(b.commit) ? `<span class="mut">${b.commit}</span>` : ''}</button>`).join('') +
+    (HIDDEN.size ? '<button class="all">show all</button>' : '');
+  el.querySelectorAll('button[data-i]').forEach(btn => btn.onclick = () => {
+    const id = CMP.builds[+btn.dataset.i].id;
+    HIDDEN.has(id) ? HIDDEN.delete(id) : HIDDEN.add(id);
+    try { localStorage.setItem(HIDE_KEY, JSON.stringify([...HIDDEN])); } catch (e) {}
+    buildChips(); render();
+  });
+  const all = el.querySelector('button.all');
+  if (all) all.onclick = () => { HIDDEN.clear(); try { localStorage.removeItem(HIDE_KEY); } catch (e) {} buildChips(); render(); };
+}
+
 function render() { renderScenario(); renderLatency(); }
 
 function init(data) {
@@ -248,7 +274,7 @@ function init(data) {
   seg('cAcl', 'acl', ['off', 'on', 'both']);
   seg('cRate', 'rate', CMP.dims.rate || [0], rateLabel);
   seg('cPin', 'pin', CMP.dims.pin || [0], pinLabel);
-  render();
+  buildChips(); render();
 }
 if (window.OFFBENCH_DATA) init(window.OFFBENCH_DATA);
 else fetch('data/dashboard.json?ts=' + Date.now()).then(r => r.json()).then(init).catch(e => { $('scenTable').innerHTML = '<div class="empty">failed to load data/dashboard.json: ' + e + '</div>'; });
